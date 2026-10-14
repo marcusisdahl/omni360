@@ -60,16 +60,20 @@ void UsenetSetupText(UsenetSetup setup, const char **heading, const char **detai
 struct UsenetRelease
 {
     char title[USENET_TITLE_MAX];
-    char indexer[64];
+    char indexer[64];        // "NZBgeek", or "NZBgeek +2" when more indexers have the same release
+    char category[48];       // Prowlarr's name for its category, "Console/XBox 360"; may be empty
     char nzbUrl[USENET_URL_MAX];
     char posted[24];         // "2026-10-12", or empty when not known
     unsigned long long size; // 0 when not known
     int grabs;               // -1 when not known
 };
 
-// Searches Prowlarr for query - Usenet releases only. Returns how many were
-// written, newest first, or -1 if Prowlarr couldn't be reached or refused
-// the search; error then says why, in a line fit for the screen.
+// Searches Prowlarr for query - Usenet releases only. The same release from
+// several indexers is listed once, with the most grabs it has on any; the
+// most grabbed come first - a release many have downloaded is the likeliest
+// to be complete - then the newest. Returns how many were written, or -1 if
+// Prowlarr couldn't be reached or refused the search; error then says why,
+// in a line fit for the screen.
 int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *out, int maxOut,
                  char *error, size_t errorSize);
 

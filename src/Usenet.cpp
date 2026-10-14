@@ -19,6 +19,7 @@ DESCRIPTION : Searching Prowlarr, fetching the chosen NZB, and the Usenet
 #include <string.h>
 #include <stdarg.h>
 #include <string>
+#include <vector>
 
 #define SETTINGS_FILE      "game:\\settings.txt"
 #define SEARCH_REPLY_MAX   (4UL * 1024 * 1024)
@@ -224,10 +225,13 @@ void UsenetSetupText(UsenetSetup setup, const char **heading, const char **detai
 // Searching
 // ---------------------------------------------------------------------------
 
-// Newest first; those with no date last.
+// Most grabbed first - many having downloaded a release is the best sign it's
+// complete - then newest, those with no date last.
 static int CompareReleases(const void *a, const void *b)
 {
     const UsenetRelease *x = (const UsenetRelease *)a, *y = (const UsenetRelease *)b;
+    if (x->grabs != y->grabs)
+        return y->grabs > x->grabs ? 1 : -1;
     if (x->posted[0] == '\0' || y->posted[0] == '\0')
         return (x->posted[0] == '\0') - (y->posted[0] == '\0');
     return strcmp(y->posted, x->posted);
@@ -299,6 +303,7 @@ int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *o
         else
         {
             n = 0;
+            std::vector<int> others(maxOut > 0 ? maxOut : 1, 0); // more indexers with each release
             const int total = cJSON_GetArraySize(root);
             for (int i = 0; i < total && n < maxOut; ++i)
             {
@@ -310,19 +315,44 @@ int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *o
                     !cJSON_IsString(title) || !cJSON_IsString(link) || strlen(link->valuestring) >= USENET_URL_MAX)
                     continue;
 
-                UsenetRelease &r = out[n++];
+                const cJSON *grabs = cJSON_GetObjectItemCaseSensitive(item, "grabs");
+                const int grabCount = cJSON_IsNumber(grabs) ? grabs->valueint : -1;
+
+                // The same release from another indexer: once, with the
+                // indexer that has the most grabs for it, and counted.
+                int same = 0;
+                while (same < n && _stricmp(out[same].title, title->valuestring) != 0)
+                    same++;
+                if (same < n)
+                {
+                    others[same]++;
+                    if (grabCount <= out[same].grabs)
+                        continue;
+                }
+                else if (n < maxOut)
+                    n++;
+                else
+                    continue;
+
+                const int keepOthers = others[same];
+                UsenetRelease &r = out[same];
                 memset(&r, 0, sizeof(r));
+                others[same] = keepOthers;
+                r.grabs = grabCount;
                 CopyText(r.title, sizeof(r.title), title->valuestring);
                 CopyText(r.nzbUrl, sizeof(r.nzbUrl), link->valuestring);
 
                 const cJSON *indexer = cJSON_GetObjectItemCaseSensitive(item, "indexer");
                 CopyText(r.indexer, sizeof(r.indexer), cJSON_IsString(indexer) ? indexer->valuestring : "");
 
+                // Its first category's name: "Console/XBox 360".
+                const cJSON *categories = cJSON_GetObjectItemCaseSensitive(item, "categories");
+                const cJSON *category = cJSON_IsArray(categories) ? cJSON_GetArrayItem(categories, 0) : NULL;
+                const cJSON *categoryName = cJSON_GetObjectItemCaseSensitive(category, "name");
+                CopyText(r.category, sizeof(r.category), cJSON_IsString(categoryName) ? categoryName->valuestring : "");
+
                 const cJSON *size = cJSON_GetObjectItemCaseSensitive(item, "size");
                 r.size = cJSON_IsNumber(size) && size->valuedouble > 0 ? (unsigned long long)size->valuedouble : 0;
-
-                const cJSON *grabs = cJSON_GetObjectItemCaseSensitive(item, "grabs");
-                r.grabs = cJSON_IsNumber(grabs) ? grabs->valueint : -1;
 
                 // "2026-10-12T08:41:00Z" - the date is enough.
                 const cJSON *date = cJSON_GetObjectItemCaseSensitive(item, "publishDate");
@@ -330,6 +360,17 @@ int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *o
                 {
                     memcpy(r.posted, date->valuestring, 10);
                     r.posted[10] = '\0';
+                }
+            }
+
+            for (int i = 0; i < n; ++i)
+            {
+                if (others[i] > 0)
+                {
+                    char more[16];
+                    _snprintf(more, sizeof(more), " +%d", others[i]);
+                    more[sizeof(more) - 1] = '\0';
+                    strncat(out[i].indexer, more, sizeof(out[i].indexer) - strlen(out[i].indexer) - 1);
                 }
             }
         }

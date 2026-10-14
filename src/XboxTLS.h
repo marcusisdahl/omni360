@@ -224,6 +224,16 @@ void XboxTLS_Free(XboxTLSContext* ctx);
  */
 void XboxTLS_SetThreadIoTimeout(unsigned long timeoutMs);
 
+/**
+ * @brief Sets the socket receive buffer for connections opened on the calling
+ * thread, in place of the 4MB a single large download wants. A thread that is
+ * one of many connections at once - Usenet's - asks for less, so fifty of
+ * them don't take 200MB. 0 goes back to the default.
+ *
+ * @param bytes The buffer size
+ */
+void XboxTLS_SetThreadRecvBuffer(unsigned long bytes);
+
 
 #ifdef __cplusplus
 }

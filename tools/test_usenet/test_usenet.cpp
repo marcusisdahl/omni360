@@ -136,6 +136,18 @@ static void TestYenc(const std::string &dir)
     }
     CHECK(rebuilt == volume);
 
+    // In place, as the downloader does it: the same bytes as into a buffer of
+    // their own.
+    {
+        std::vector<unsigned char> body = ReadAll(dir + "\\articles\\002.txt");
+        YencPart apart, inplace;
+        CHECK(YencDecode((const char *)&body[0], (unsigned long)body.size(), out, 1024 * 1024, &apart) == YENC_OK);
+        CHECK(YencDecode((const char *)&body[0], (unsigned long)body.size(), &body[0], (unsigned long)body.size(),
+                         &inplace) == YENC_OK);
+        CHECK(inplace.length == apart.length && inplace.offset == apart.offset &&
+              memcmp(&body[0], out, apart.length) == 0 && strcmp(inplace.name, apart.name) == 0);
+    }
+
     // One part, no =ypart, a name with spaces, crc32= rather than pcrc32=.
     std::vector<unsigned char> single = ReadAll(dir + "\\single.txt");
     YencPart part;

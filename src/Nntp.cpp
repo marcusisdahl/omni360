@@ -27,8 +27,12 @@ int addTrustAnchors(XboxTLSContext *ctx);
 #define IO_TIMEOUT_MS        30000 // an article starts in well under a second; 30s of nothing is a dead connection
 #define READ_CHUNK           65536
 #define LINE_MAX_LEN         8192  // yEnc lines are 128-256 bytes
-#define BODY_START           (2UL * 1024 * 1024)
+// Per connection, so fifty fit: an article is usually 700-800KB of yEnc, and
+// the buffer grows for a bigger one. About 1.5MB a connection in all.
+#define BODY_START           (1UL * 1024 * 1024)
 #define BODY_MAX             (32UL * 1024 * 1024)
+#define SOCKET_BUFFER        (256UL * 1024)   // not XboxTLS's 4MB: that's for one connection, not fifty
+#define THREAD_STACK         (128UL * 1024)
 #define ARTICLE_TRIES        3     // a server that answers but fails mid-article, before calling it missing
 #define RECONNECT_TRIES      5
 #define CONNECT_STAGGER_MS   250
@@ -171,7 +175,7 @@ static ConnectResult Connect(Conn *c, const NntpServer &server, char *why, size_
             return CONNECT_FAILED;
         BOOL yes = TRUE;
         DWORD timeoutMs = IO_TIMEOUT_MS;
-        int rcvbuf = 1024 * 1024;
+        int rcvbuf = (int)SOCKET_BUFFER;
         setsockopt(c->sock, SOL_SOCKET, XBOX_SO_BYPASS_SECURITY, (PCSTR)&yes, sizeof(yes));
         setsockopt(c->sock, SOL_SOCKET, SO_RCVBUF, (PCSTR)&rcvbuf, sizeof(rcvbuf));
         setsockopt(c->sock, SOL_SOCKET, SO_RCVTIMEO, (PCSTR)&timeoutMs, sizeof(timeoutMs));
@@ -365,17 +369,17 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
     const int slot = args->slot;
 
     XboxTLS_SetThreadIoTimeout(IO_TIMEOUT_MS);
+    XboxTLS_SetThreadRecvBuffer(SOCKET_BUFFER);
 
+    // One buffer: the article arrives in it and is decoded in place.
     Conn *c = (Conn *)malloc(sizeof(Conn));
     unsigned long bodyCap = BODY_START;
     char *body = (char *)malloc(bodyCap);
-    unsigned char *decoded = (unsigned char *)malloc(bodyCap);
     char *line = (char *)malloc(LINE_MAX_LEN);
-    if (c == NULL || body == NULL || decoded == NULL || line == NULL)
+    if (c == NULL || body == NULL || line == NULL)
     {
         free(c);
         free(body);
-        free(decoded);
         free(line);
         return 0;
     }
@@ -458,12 +462,9 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                     {
                         unsigned long newCap = bodyCap * 2;
                         char *bigger = (newCap <= BODY_MAX) ? (char *)realloc(body, newCap) : NULL;
-                        unsigned char *biggerOut = (bigger != NULL) ? (unsigned char *)realloc(decoded, newCap) : NULL;
                         if (bigger != NULL)
-                            body = bigger;
-                        if (biggerOut != NULL)
                         {
-                            decoded = biggerOut;
+                            body = bigger;
                             bodyCap = newCap;
                         }
                         else
@@ -495,6 +496,7 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
             if (got)
             {
                 YencPart part;
+                unsigned char *decoded = (unsigned char *)body; // in place - see YencDecode
                 const YencResult r = YencDecode(body, bodyLen, decoded, bodyCap, &part);
                 if (r == YENC_OK || r == YENC_CRC_MISMATCH)
                 {
@@ -544,7 +546,6 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
 
     free(c);
     free(body);
-    free(decoded);
     free(line);
     return 0;
 }
@@ -669,6 +670,10 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, Nnt
     WSADATA wsadata;
     WSAStartup(MAKEWORD(2, 2), &wsadata);
 
+    // The CRC table, built here before any connection needs it: built by the
+    // first to ask, the others could see it half-made.
+    YencCrc32(0, NULL, 0);
+
     ThreadArgs args[NNTP_MAX_CONNECTIONS];
     HANDLE threads[NNTP_MAX_CONNECTIONS];
     int started = 0;
@@ -678,7 +683,7 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, Nnt
     {
         args[i].s = s;
         args[i].slot = i;
-        threads[i] = CreateThread(NULL, 256 * 1024, ConnectionEntryGuarded, &args[i], CREATE_SUSPENDED, NULL);
+        threads[i] = CreateThread(NULL, THREAD_STACK, ConnectionEntryGuarded, &args[i], CREATE_SUSPENDED, NULL);
         if (threads[i] == NULL)
             break;
 #ifdef _XBOX

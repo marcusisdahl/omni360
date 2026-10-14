@@ -225,9 +225,31 @@ static DWORD XboxTLS_IoTimeoutForThisThread() {
     return ms != 0 ? ms : XBOXTLS_IO_TIMEOUT_MS;
 }
 
+// And a thread's own receive buffer size, from XboxTLS_SetThreadRecvBuffer,
+// the same way.
+static volatile LONG g_recvSlot = (LONG)TLS_OUT_OF_INDEXES;
+
+void XboxTLS_SetThreadRecvBuffer(unsigned long bytes) {
+    if (g_recvSlot == (LONG)TLS_OUT_OF_INDEXES) {
+        DWORD slot = TlsAlloc();
+        if (slot == TLS_OUT_OF_INDEXES)
+            return;
+        if (InterlockedCompareExchange(&g_recvSlot, (LONG)slot, (LONG)TLS_OUT_OF_INDEXES) != (LONG)TLS_OUT_OF_INDEXES)
+            TlsFree(slot);
+    }
+    TlsSetValue((DWORD)g_recvSlot, (LPVOID)(ULONG_PTR)bytes);
+}
+
+static int XboxTLS_RecvBufferForThisThread() {
+    if (g_recvSlot == (LONG)TLS_OUT_OF_INDEXES)
+        return XBOXTLS_RECV_BUFFER_SIZE;
+    DWORD bytes = (DWORD)(ULONG_PTR)TlsGetValue((DWORD)g_recvSlot);
+    return bytes != 0 ? (int)bytes : XBOXTLS_RECV_BUFFER_SIZE;
+}
+
 static void XboxTLS_SetSocketOptions(SOCKET sock) {
     BOOL opt_true = TRUE;
-    int recvBufferSize = XBOXTLS_RECV_BUFFER_SIZE;
+    int recvBufferSize = XboxTLS_RecvBufferForThisThread();
 
     setsockopt(sock, SOL_SOCKET, XBOX_SO_BYPASS_SECURITY, (PCSTR)&opt_true, sizeof(opt_true));
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (PCSTR)&recvBufferSize, sizeof(recvBufferSize));

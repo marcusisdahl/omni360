@@ -42,6 +42,9 @@ struct YencPart
 // Decodes one article body into out (outCap bytes). On YENC_OK, *part says
 // what it is and where it goes. On YENC_CRC_MISMATCH *part is filled too, and
 // out holds the damaged bytes.
+//
+// out may be body itself: every byte written uses up at least one read, so
+// the writing never overtakes the reading - one buffer a connection, not two.
 YencResult YencDecode(const char *body, unsigned long len, unsigned char *out, unsigned long outCap,
                       YencPart *part);
 

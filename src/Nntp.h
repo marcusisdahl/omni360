@@ -33,7 +33,7 @@ struct NntpServer
     int connections;       // 1 to NNTP_MAX_CONNECTIONS
 };
 
-#define NNTP_MAX_CONNECTIONS 16
+#define NNTP_MAX_CONNECTIONS 50 // about 1.5MB of memory each
 
 enum NntpResult
 {

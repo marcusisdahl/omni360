@@ -993,7 +993,7 @@ struct Picker
     // What the list page draws. labels point into packs/updates.
     const char *labels[MAX_PICKER_ROWS];
     const char *sublabels[MAX_PICKER_ROWS];
-    char subText[MAX_PICKER_ROWS][96];
+    char subText[MAX_PICKER_ROWS][128];
 };
 
 // Where SearchResults land - static, as they're 8KB.
@@ -1083,6 +1083,8 @@ static void FillUsenetRows(Picker &picker)
         sub[0] = '\0';
         if (release.size > 0)
             FormatBytes(release.size, sub, subSize);
+        if (release.category[0] != '\0')
+            AppendText(sub, subSize, "   ", release.category);
         if (release.indexer[0] != '\0')
             AppendText(sub, subSize, "   ", release.indexer);
         if (release.posted[0] != '\0')
@@ -1714,6 +1716,21 @@ static bool SettingsRowFocusable(const SettingsRowView &row)
     return row.kind != SETTINGS_VIEW_HEADING || row.controlCount > 0;
 }
 
+// The values Usenet's connections step through, left and right: one at a
+// time to ten, then by fives - fifty presses to reach a provider's limit
+// would be no setting at all.
+static const int kConnectionSteps[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 35, 40, 45, 50 };
+#define CONNECTION_STEP_COUNT ((int)(sizeof(kConnectionSteps) / sizeof(kConnectionSteps[0])))
+
+// Where a number of connections sits among them: the last step at or below it.
+static int ConnectionStepIndex(int connections)
+{
+    int at = 0;
+    while (at + 1 < CONNECTION_STEP_COUNT && kConnectionSteps[at + 1] <= connections)
+        at++;
+    return at;
+}
+
 static void BuildSettingsPage(SettingsPage &page, const Library &lib, const char *gamesPath)
 {
     std::string accessKey, secretKey;
@@ -1936,11 +1953,12 @@ static void BuildSettingsPage(SettingsPage &page, const Library &lib, const char
     page.connectionsValue[sizeof(page.connectionsValue) - 1] = '\0';
     AddSettingsRow(page, SETTINGS_VIEW_LINE, "Connections");
     AddSettingsControl(page, SETTINGS_CONTROL_VALUE, page.connectionsValue, SETTINGS_ROW_USENET_CONNECTIONS,
-                       "How many articles download at once - left and right change it. Stay within your plan's limit.");
+                       "How many articles download at once - left and right change it, up to 50. Stay within your "
+                       "plan's limit; each takes about 1.5MB of memory.");
     {
         SettingsControlView &c = page.rows[page.count - 1].controls[0];
-        c.valueIndex = usenet.server.connections - 1;
-        c.valueCount = NNTP_MAX_CONNECTIONS;
+        c.valueIndex = ConnectionStepIndex(usenet.server.connections);
+        c.valueCount = CONNECTION_STEP_COUNT;
     }
 
     // The focus where it was, on a row that's still there.
@@ -2138,9 +2156,10 @@ static void StepUsenetConnections(int step)
 {
     UsenetConfig config;
     LoadUsenetConfig(&config);
-    const int connections = config.server.connections + step;
-    if (connections < 1 || connections > NNTP_MAX_CONNECTIONS)
+    const int at = ConnectionStepIndex(config.server.connections) + step;
+    if (at < 0 || at >= CONNECTION_STEP_COUNT)
         return;
+    const int connections = kConnectionSteps[at];
     char value[8];
     _snprintf(value, sizeof(value), "%d", connections);
     value[sizeof(value) - 1] = '\0';
