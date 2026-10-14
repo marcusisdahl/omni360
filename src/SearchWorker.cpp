@@ -7,6 +7,7 @@ DESCRIPTION : DLC and title update searches on a worker thread, so the picker
 */
 
 #include "SearchWorker.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "OutputConsole.h"
 
 #include <xtl.h>
@@ -95,6 +96,8 @@ static DWORD WINAPI SearchEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("search", SearchEntry)
+
 bool StartSearchWorker()
 {
     if (g_running)
@@ -111,7 +114,7 @@ bool StartSearchWorker()
 
     // The same stack as the download worker, for the same HTTP and TLS
     // buffers - see StartDownloadQueue.
-    g_thread = CreateThread(NULL, 256 * 1024, SearchEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, SearchEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         dprintf("[search] CreateThread failed (%lu)\n", GetLastError());

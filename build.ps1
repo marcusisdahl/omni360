@@ -31,6 +31,8 @@ try {
     New-Item -ItemType Directory -Force dist | Out-Null
     Copy-Item -Force Release\Omni360.xex dist\Omni360.xex
     Copy-Item -Force tools\settings.example.txt dist\settings.example.txt
+    # For turning a [crash] line's addresses in DebugInfo.txt into function names.
+    Copy-Item -Force Release\Omni360.map dist\Omni360.map
 
     if ($Tests) {
         Push-Location tools\test_usenet

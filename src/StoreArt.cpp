@@ -6,6 +6,7 @@ DESCRIPTION : The Store's artwork and details from Xbox Live, fetched and
 */
 
 #include "StoreArt.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "HttpPlain.h"
 #include "OutputConsole.h"
 #include "ImageDecode.h"
@@ -606,6 +607,8 @@ static DWORD WINAPI StoreArtEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("store art", StoreArtEntry)
+
 bool StartStoreArt()
 {
     if (g_running)
@@ -621,7 +624,7 @@ bool StartStoreArt()
 
     // The same stack as the other workers: a redirect to HTTPS goes through
     // the TLS client.
-    g_thread = CreateThread(NULL, 256 * 1024, StoreArtEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, StoreArtEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         dprintf("[store] CreateThread failed (%lu)\n", GetLastError());

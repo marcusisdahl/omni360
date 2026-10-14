@@ -11,6 +11,7 @@ and each chunk's state, never the copies themselves.
 */
 
 #include "ReadAhead.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 
 #ifdef _XBOX
 #include <xtl.h>
@@ -103,6 +104,13 @@ bool ReadAheadSource::Direct(unsigned long long offset, unsigned char *out, unsi
     return inner->ReadAt(offset, out, len);
 }
 
+#ifdef _XBOX
+GUARDED_THREAD("read-ahead", ProducerEntry)
+#define PRODUCERENTRY_THREAD ProducerEntryGuarded
+#else
+#define PRODUCERENTRY_THREAD ProducerEntry
+#endif
+
 bool ReadAheadSource::Start(unsigned long long from)
 {
     if (chunkCount == 0 || from >= inner->Size())
@@ -118,7 +126,7 @@ bool ReadAheadSource::Start(unsigned long long from)
     ResetEvent((HANDLE)dataEvent);
     ResetEvent((HANDLE)spaceEvent);
 
-    HANDLE h = CreateThread(NULL, 0, ProducerEntry, this, CREATE_SUSPENDED, NULL);
+    HANDLE h = CreateThread(NULL, 0, PRODUCERENTRY_THREAD, this, CREATE_SUSPENDED, NULL);
     if (h == NULL)
         return false;
 

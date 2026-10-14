@@ -6,6 +6,7 @@ DESCRIPTION : The Store's featured games, from featured.json in the
 */
 
 #include "Featured.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "StoreCatalog.h" // StoreGameByTitleId: only games the Store has
 #include "downloadFile.h" // HttpsSession
 #include "OutputConsole.h"
@@ -266,6 +267,8 @@ static DWORD WINAPI FetchEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("featured", FetchEntry)
+
 void StartFeatured()
 {
     if (!g_lockReady)
@@ -296,7 +299,7 @@ void StartFeatured()
     }
     Publish(set);
 
-    HANDLE thread = CreateThread(NULL, 256 * 1024, FetchEntry, NULL, CREATE_SUSPENDED, NULL);
+    HANDLE thread = CreateThread(NULL, 256 * 1024, FetchEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (thread == NULL)
         return;
 #ifdef _XBOX

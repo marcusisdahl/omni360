@@ -7,6 +7,7 @@ DESCRIPTION : the download queue - DLC packs and title updates, installed one
 */
 
 #include "DownloadQueue.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "downloadFile.h" // FormatBytes, DownloadProgressFn
 #include "OutputConsole.h"
 
@@ -524,6 +525,8 @@ static DWORD WINAPI WorkerEntry(LPVOID)
 // Public API - called from the UI thread
 // ---------------------------------------------------------------------------
 
+GUARDED_THREAD("download queue", WorkerEntry)
+
 bool StartDownloadQueue(const char *contentBasePath)
 {
     if (g_running)
@@ -544,7 +547,7 @@ bool StartDownloadQueue(const char *contentBasePath)
     // the stack per request (DumpResponse's request text alone is 5KB), and
     // BearSSL's handshake needs its own; the default would be cutting it
     // close for no saving worth having.
-    g_thread = CreateThread(NULL, 256 * 1024, WorkerEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, WorkerEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         dprintf("[queue] CreateThread failed (%lu)\n", GetLastError());

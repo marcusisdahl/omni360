@@ -6,6 +6,7 @@ DESCRIPTION : Downloading an NZB's articles over several NNTP connections.
 */
 
 #include "Nntp.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "Nzb.h"
 #include "Yenc.h"
 #include "XboxTLS.h"
@@ -604,6 +605,8 @@ static void SetError(char *error, size_t errorSize, const char *format, ...)
     error[errorSize - 1] = '\0';
 }
 
+GUARDED_THREAD("usenet connection", ConnectionEntry)
+
 NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, NntpProgressFn progressFn,
                         void *context, unsigned long *outMissing, char *error, size_t errorSize)
 {
@@ -675,7 +678,7 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, Nnt
     {
         args[i].s = s;
         args[i].slot = i;
-        threads[i] = CreateThread(NULL, 256 * 1024, ConnectionEntry, &args[i], CREATE_SUSPENDED, NULL);
+        threads[i] = CreateThread(NULL, 256 * 1024, ConnectionEntryGuarded, &args[i], CREATE_SUSPENDED, NULL);
         if (threads[i] == NULL)
             break;
 #ifdef _XBOX

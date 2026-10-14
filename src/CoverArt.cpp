@@ -6,6 +6,7 @@ DESCRIPTION : Box art from Xbox Live, else xboxunity.net, looked up, cut to a ti
 */
 
 #include "CoverArt.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "downloadFile.h"
 #include "HttpPlain.h"
 #include "OutputConsole.h"
@@ -741,6 +742,8 @@ static DWORD WINAPI CoverEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("cover art", CoverEntry)
+
 bool StartCoverArt()
 {
     if (g_running)
@@ -756,7 +759,7 @@ bool StartCoverArt()
     }
 
     // The same stack as the other workers, for the same HTTP and TLS buffers.
-    g_thread = CreateThread(NULL, 256 * 1024, CoverEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, CoverEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         dprintf("[covers] CreateThread failed (%lu)\n", GetLastError());

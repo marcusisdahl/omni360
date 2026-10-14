@@ -6,6 +6,7 @@ DESCRIPTION : Watches the disc drive and installs discs as Games on Demand, on
 */
 
 #include "DiscWorker.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "DiscSource.h"
 #include "GodConvert.h"
 #include "ReadAhead.h"
@@ -535,6 +536,8 @@ static DWORD WINAPI DiscEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("disc", DiscEntry)
+
 bool StartDiscWorker(const char *gamesPath)
 {
     if (g_running)
@@ -553,7 +556,7 @@ bool StartDiscWorker(const char *gamesPath)
 
     // GodConvert's hashing and the read-ahead's buffers want more than the
     // default; the same stack as the other workers.
-    g_thread = CreateThread(NULL, 256 * 1024, DiscEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, DiscEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         dprintf("[disc] CreateThread failed (%lu)\n", GetLastError());

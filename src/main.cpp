@@ -18,6 +18,7 @@ end-to-end on real hardware against a real 27-game library.
 */
 
 #include "OutputConsole.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "AtgConsole.h"
 #include "AtgUtil.h"
 #include "driveMount.h"
@@ -4715,7 +4716,25 @@ static DWORD WINAPI StartupLoadEntry(LPVOID param)
     return 0;
 }
 
+GUARDED_THREAD("startup", StartupLoadEntry)
+
+static int RunApp();
+
+// The UI thread, with LogCrash watching it as it does the workers. RunApp
+// holds C++ objects, which a function with __try can't.
 int main()
+{
+    __try
+    {
+        return RunApp();
+    }
+    __except (LogCrash("UI", GetExceptionInformation()))
+    {
+        return EXIT_FAILURE;
+    }
+}
+
+static int RunApp()
 {
     g_startupStart = g_startupLast = ImageTimerMs();
 
@@ -4829,7 +4848,7 @@ int main()
     load.lib = &lib;
     load.contentBasePath = contentBasePath;
     load.gamesPath = gamesPath;
-    HANDLE loader = CreateThread(NULL, 256 * 1024, StartupLoadEntry, &load, CREATE_SUSPENDED, NULL);
+    HANDLE loader = CreateThread(NULL, 256 * 1024, StartupLoadEntryGuarded, &load, CREATE_SUSPENDED, NULL);
     if (loader == NULL)
     {
         dprintf("[startup] CreateThread failed (%lu) - reading the library on this thread\n", GetLastError());

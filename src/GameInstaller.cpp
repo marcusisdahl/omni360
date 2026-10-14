@@ -6,6 +6,7 @@ DESCRIPTION : Downloads a Redump game's zip from archive.org and installs it as
 */
 
 #include "GameInstaller.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "InflateSource.h"
 #include "GodConvert.h"
 #include "ReadAhead.h"
@@ -1172,6 +1173,8 @@ static bool InstallImage(GameJob *job, const char *gamesPath, GodSource *image, 
 
 static void RunUsenetJob(GameJob *job, const char *gamesPath); // below
 
+GUARDED_THREAD("game download", ConnectionEntry)
+
 static void RunJob(GameJob *job, const char *gamesPath)
 {
     if (job->request.usenet)
@@ -1369,7 +1372,7 @@ static void RunJob(GameJob *job, const char *gamesPath)
     {
         args[i].d = &d;
         args[i].slot = i;
-        threads[i] = CreateThread(NULL, 256 * 1024, ConnectionEntry, &args[i], CREATE_SUSPENDED, &d.threadIds[i]);
+        threads[i] = CreateThread(NULL, 256 * 1024, ConnectionEntryGuarded, &args[i], CREATE_SUSPENDED, &d.threadIds[i]);
         if (threads[i] == NULL)
             break;
 #ifdef _XBOX
@@ -1855,6 +1858,8 @@ static DWORD WINAPI InstallerEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("game installer", InstallerEntry)
+
 bool StartGameInstaller(const char *gamesPath)
 {
     if (g_running)
@@ -1872,7 +1877,7 @@ bool StartGameInstaller(const char *gamesPath)
     if (g_wake == NULL)
         return false;
 
-    g_thread = CreateThread(NULL, 256 * 1024, InstallerEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, InstallerEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         CloseHandle(g_wake);

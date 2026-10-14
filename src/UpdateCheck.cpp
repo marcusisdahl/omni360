@@ -5,6 +5,7 @@ DESCRIPTION : Asks GitHub whether there's a newer release. See UpdateCheck.h.
 */
 
 #include "UpdateCheck.h"
+#include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "UpdateKey.h"    // kUpdatePublicKey
 #include "settings.h"     // CURRENT_VERSION
 #include "downloadFile.h" // httpRequestHTTPS
@@ -366,6 +367,8 @@ static DWORD WINAPI CheckEntry(LPVOID)
     return 0;
 }
 
+GUARDED_THREAD("update check", CheckEntry)
+
 void StartUpdateCheck()
 {
     if (!g_lockReady)
@@ -389,7 +392,7 @@ void StartUpdateCheck()
     }
 
     // The same stack as the other workers, for the HTTP and TLS buffers.
-    g_thread = CreateThread(NULL, 256 * 1024, CheckEntry, NULL, CREATE_SUSPENDED, NULL);
+    g_thread = CreateThread(NULL, 256 * 1024, CheckEntryGuarded, NULL, CREATE_SUSPENDED, NULL);
     if (g_thread == NULL)
     {
         EnterCriticalSection(&g_lock);
