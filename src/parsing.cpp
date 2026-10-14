@@ -319,6 +319,19 @@ bool UrlEncodeFormValue(const char *src, char *dst, unsigned long long dstSize)
     return true;
 }
 
+// Whether a query parameter, at its name, carries a key: apikey=, api_key=,
+// token=, key=, pass= or password=, in any case.
+static bool IsSecretParam(const char *name)
+{
+    static const char *const kSecret[] = { "apikey=", "api_key=", "token=", "key=", "pass=", "password=" };
+    for (int k = 0; k < (int)(sizeof(kSecret) / sizeof(kSecret[0])); ++k)
+    {
+        if (_strnicmp(name, kSecret[k], strlen(kSecret[k])) == 0)
+            return true;
+    }
+    return false;
+}
+
 bool LogEscapePercent(const char *src, char *dst, unsigned long long dstSize)
 {
     if (dst == NULL || dstSize == 0)
@@ -334,6 +347,27 @@ bool LogEscapePercent(const char *src, char *dst, unsigned long long dstSize)
 
     for (int i = 0; src[i] != '\0'; ++i)
     {
+        // A key in a query string - an indexer's or Prowlarr's apikey=, a
+        // token= - is kept out of the log: its name stays, its value doesn't.
+        if ((src[i] == '?' || src[i] == '&') && IsSecretParam(src + i + 1))
+        {
+            const char *eq = strchr(src + i + 1, '=');
+            const unsigned long long nameLen = (unsigned long long)(eq - (src + i)) + 1; // "&apikey="
+            if (out + nameLen + 3 >= dstSize)
+            {
+                dst[out] = '\0';
+                return false;
+            }
+            memcpy(dst + out, src + i, (size_t)nameLen);
+            out += nameLen;
+            memcpy(dst + out, "***", 3);
+            out += 3;
+            i = (int)(eq - src);
+            while (src[i + 1] != '\0' && src[i + 1] != '&' && src[i + 1] != '#')
+                i++;
+            continue;
+        }
+
         if (src[i] == '%')
         {
             if (out + 2 >= dstSize)

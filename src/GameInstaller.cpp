@@ -1689,7 +1689,7 @@ static void RunUsenetJob(GameJob *job, const char *gamesPath)
     SetPhase(job, "Getting the NZB", 0, 0, 0);
     char error[160] = "";
     unsigned long nzbLen = 0;
-    char *xml = FetchNzb(req.nzbUrl, config.prowlarrKey, &nzbLen, error, sizeof(error));
+    char *xml = FetchNzb(config, req.nzbUrl, &nzbLen, error, sizeof(error));
     if (xml == NULL)
     {
         FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't get the NZB", error, true);

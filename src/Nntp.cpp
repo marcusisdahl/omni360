@@ -548,6 +548,45 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
     return 0;
 }
 
+bool NntpTestLogin(const NntpServer &server, char *message, size_t messageSize)
+{
+    XNetStartupParams xnsp;
+    memset(&xnsp, 0, sizeof(xnsp));
+    xnsp.cfgSizeOfStruct = sizeof(xnsp);
+    xnsp.cfgFlags = XNET_STARTUP_BYPASS_SECURITY;
+    XNetStartup(&xnsp);
+    WSADATA wsadata;
+    WSAStartup(MAKEWORD(2, 2), &wsadata);
+    XboxTLS_SetThreadIoTimeout(15000);
+
+    Conn *c = (Conn *)malloc(sizeof(Conn));
+    bool ok = false;
+    if (c != NULL)
+    {
+        memset(c, 0, sizeof(*c));
+        char why[160];
+        const ConnectResult r = Connect(c, server, why, sizeof(why));
+        ok = (r == CONNECT_OK);
+        if (ok)
+        {
+            char reply[128];
+            SendCommand(c, "QUIT\r\n", reply, sizeof(reply));
+            Close(c);
+            _snprintf(message, messageSize, "Logged in to %s%s.", server.host,
+                      server.ssl ? " over TLS" : " (not encrypted)");
+        }
+        else
+            _snprintf(message, messageSize, "%s", why[0] != '\0' ? why : "Couldn't connect.");
+        message[messageSize - 1] = '\0';
+        free(c);
+    }
+    XboxTLS_SetThreadIoTimeout(0);
+    WSACleanup();
+    XNetCleanup();
+    dprintf("[nntp] login test: %s\n", ok ? "ok" : "failed");
+    return ok;
+}
+
 void NntpFilePath(const char *dir, int index, char *out, size_t outSize)
 {
     _snprintf(out, outSize, "%s\\F%03d", dir, index);

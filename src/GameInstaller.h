@@ -37,7 +37,7 @@
 
 #define GAME_JOB_ID_BASE 2000000
 #define MAX_GAME_JOBS 8
-#define GAME_NZB_URL_MAX 1536
+#define GAME_NZB_URL_MAX 2048 // USENET_URL_MAX
 
 inline bool IsGameJobId(int id) { return id >= GAME_JOB_ID_BASE; }
 

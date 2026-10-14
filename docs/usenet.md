@@ -14,7 +14,8 @@ Store → Usenet → keyboard
   → A: QueueUsenetRelease() → EnqueueGameInstall(GameRequest{ usenet = true, nzbUrl })
 GameInstaller's worker: RunJob → RunUsenetJob
   1. LoadUsenetConfig()         settings.txt, read when the job starts
-  2. FetchNzb()                 the release's downloadUrl, through Prowlarr
+  2. FetchNzb()                 the release's downloadUrl: Prowlarr answers 301 to the indexer's link,
+                                and the NZB comes from the indexer, over HTTPS
   3. NzbParse()                 files, segments, message IDs
   4. room check                 the download (par2 left out) and the game: twice the download
   5. NntpDownload()             every non-par2 file into <drive>\Omni360Staging\U<job id>\F000, F001, …
@@ -36,6 +37,22 @@ The job is a game job like any other: one at a time on the installer's worker, l
 | `RarVolumes.cpp` / `.h` | Orders a RAR set by its names, walks each volume's headers, and reads a stored file's slices across the volumes as one image (`SpanSource`) | Yes |
 
 The Xbox-free ones are tested on a PC by `tools/test_usenet` (`python make_test_data.py`, then `build_and_run.bat`): yEnc round trips, a CRC that catches a changed byte, an NZB with segments out of order and listed twice, and a 10MB image read out of hand-made RAR4 volume sets with both naming schemes, including reads that cross volumes and a volume missing from the middle.
+
+## Settings and Prowlarr
+
+The keys live in `settings.txt` and can be set there or on the console, under **Settings → Usenet** (`main.cpp`, `ChangeProwlarrAddress` and the functions after it), which writes them back with `SetSettingsValue`. A typed Prowlarr address is made a URL by `UsenetNormaliseProwlarrUrl`: `192.168.1.10` becomes `http://192.168.1.10:9696`. Each search and each job reads the file again, so a change counts at once.
+
+Two **Test** buttons check the setup without a download: Prowlarr's is `GET /api/v1/indexer`, counting enabled indexers whose `protocol` is `usenet`; the server's is one connection, logged in and closed (`NntpTestLogin`).
+
+What Prowlarr does with a search and a grab, from its source (`SearchController`, `NewznabController.GetDownload`, `DownloadMappingService`):
+
+- `GET /api/v1/search?query=…&type=search&limit=100[&categories=N…]` with `X-Api-Key` returns releases; each `downloadUrl` is Prowlarr's own proxy link, `{scheme}://{host}:{port}{urlBase}/{indexerId}/download?apikey=…&link=…&file=…`, built from the address the request came in on — so it points where the console can reach. Searches can take a while, as Prowlarr waits for every indexer; the console waits up to two minutes for an answer.
+- Fetching that link for a **Usenet** indexer always answers `301` to the indexer's real link (`RedirectPermanent`): Prowlarr records the grab, and the NZB comes from the indexer. The link carries Prowlarr's key itself, so `FetchNzb` sends no `X-Api-Key` — a header would follow the redirect to the indexer. Errors come back as `429` (the indexer's grab limit) or `410` (the indexer disabled, or the release gone).
+- A link to `localhost`, or with no host - from a Prowlarr set up behind a proxy - is pointed at `prowlarr-url`'s host (`ReachableNzbUrl`). A gzipped NZB is unpacked.
+
+The indexer's HTTPS certificate has to chain to a compiled-in root. Checked in October 2026: NZBGeek, NZBFinder, DrunkenSlug, altHUB, NinjaCentral, nzb.su and NZBStars are behind Cloudflare (GTS Root R4), NZBPlanet uses Let's Encrypt (ISRG X1), usenet-crawler chains to USERTrust RSA.
+
+Query-string keys - `apikey=`, `token=`, `key=`, `pass=` - are hidden wherever a URL is logged (`LogEscapePercent`), so neither Prowlarr's nor an indexer's key reaches `DebugInfo.txt`.
 
 ## The downloader
 
@@ -83,4 +100,4 @@ The check before downloading wants twice the download's size — the files, and 
 - Decompressing RAR (and 7z).
 - Obfuscated posts — random file names, made right only by par2.
 - Resuming a download across a restart: the staging folder is cleared when Omni360 starts.
-- A Settings page section for the Usenet keys: they're `settings.txt` only.
+

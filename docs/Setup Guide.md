@@ -88,7 +88,17 @@ The Store's **Usenet** button searches your own [Prowlarr](https://prowlarr.com/
 - **Prowlarr**, running on a PC or NAS the console can reach, with your indexers added to it. Its API key is in Prowlarr under **Settings → General**.
 - **A Usenet provider account**: its server name, your user name and password, and how many connections your plan allows.
 
-Add these to `settings.txt`:
+**On the console**, it's all in **Settings → Usenet**:
+
+- **Prowlarr** — **Address** is the IP of the PC or NAS it runs on, like `192.168.1.10`; its port, 9696, is added for you (type a full URL, like `http://192.168.1.10:9696/prowlarr`, if yours is different). **API key** is in Prowlarr under **Settings → General → Security**. **Test** asks Prowlarr for its indexers and says how many Usenet ones are on.
+- **Usenet server** — **Server** is your provider's news server, like `news.example.com` (add `:port` for an unusual one). **Login** asks for your user name, then your password. **TLS** is on by default.
+- **Connections** — **Test** logs in to the server once; left and right on the number change how many connections a download uses.
+
+Prowlarr has to be reachable from the console: use the PC's IP address rather than its name, and allow port 9696 through its firewall. Prowlarr listens on every network by default.
+
+When you pick a release, the NZB doesn't come from Prowlarr itself: for a Usenet indexer, Prowlarr records the grab and redirects to the indexer's own download link, so the console fetches the NZB from the indexer over HTTPS. Most indexers sit behind Cloudflare or use Let's Encrypt, whose roots Omni360 carries.
+
+Or, the same in `settings.txt`:
 
 ```
 prowlarr-url: http://192.168.1.10:9696
@@ -106,7 +116,7 @@ Optional keys:
 - `usenet-connections:` — 8 by default, 16 at most. Stay within your plan's limit; a provider turns away connections over it.
 - `usenet-categories: 1000,1050` — only search these Newznab categories. Without it, every category is searched.
 
-**These are plain text, like your archive.org keys.** The same caution applies.
+**These are plain text, like your archive.org keys** — Settings writes them to the same `settings.txt`. The same caution applies. Keys are kept out of `DebugInfo.txt`.
 
 Then **Store → Usenet**: type what to search for, and the releases Prowlarr finds are listed, newest first, with each one's size, indexer, date and grabs. **A** adds one to the Queue, where it shows the NZB being fetched, the download (with how many connections are up), then the install. A post of several discs installs each of them.
 
@@ -136,6 +146,7 @@ Room needed is the download and the game, as with archive.org: about twice the r
 - **Game pages with no description, wallpaper or screenshots** — they come from Xbox Live's servers, and DashLaunch's `livestrong` setting blocks those (the log shows `[dns] download.xbox.com: the DNS server says there's no such name`). Box art still comes from xboxunity, and downloads from archive.org are unaffected. Turn `livestrong` off in `launch.ini` if you want the details; `liveblock` on its own doesn't block them.
 - **Nothing will connect, but Aurora can** — look for `WSA error 10060` in the log: every connection is timing out, so something between the console and the internet is dropping the app's connections. Open an issue on GitHub with the log; it helps to say how the console is modded and which plugins it runs.
 - **"Could not search Prowlarr"** — the line under it says why. "Couldn't reach Prowlarr" means the console can't get to `prowlarr-url:` — use the PC's IP address rather than its name, and check the port (9696 by default) is open to the network. "Refused the API key" means `prowlarr-key:` is wrong.
+- **"Couldn't get the NZB"** — Prowlarr redirects the download to the indexer, so either Prowlarr or the indexer couldn't be reached. "Download limit has been reached" is the indexer's daily grab limit; "disabled" means Prowlarr has paused the indexer after failures. A secure-connection failure in the log for the indexer's host means its certificate chains to a root Omni360 doesn't carry — open an issue naming the indexer.
 - **"Usenet login refused"** — check `usenet-user:` and `usenet-pass:`. "Turned the connection away" with a 502 in the log is usually your plan's connection limit: lower `usenet-connections:`.
 - **"Couldn't make a secure connection"** to your Usenet provider — its certificate chains to a root Omni360 doesn't carry (`tools/make_trust_anchors.py` lists them). Try `usenet-ssl: off` if your provider offers plain NNTP, or open an issue naming the provider.
 - **"Download incomplete"** — articles were missing or damaged, and there's no par2 repair on the console. Pick another release of the same game.

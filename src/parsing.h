@@ -31,7 +31,9 @@ bool ExtractSetCookies(const char *headers, int headerLen, char *cookieJar, unsi
 // from src into dst. Returns false if dst is too small.
 bool UrlEncodeFormValue(const char *src, char *dst, unsigned long long dstSize);
 
-// Doubles every '%' so a string survives being LOGGED.
+// Doubles every '%' so a string survives being LOGGED - and, in a URL, hides
+// the value of a query parameter that carries a key (apikey=, token=, key=,
+// pass=...), so an indexer's or Prowlarr's key never reaches DebugInfo.txt.
 //
 // Strings containing percent signs - percent-encoded URLs above all - come out
 // mangled in this project's log, and confirmed on hardware it is the log that

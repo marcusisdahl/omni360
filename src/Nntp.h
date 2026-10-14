@@ -63,6 +63,10 @@ typedef bool (*NntpProgressFn)(const NntpProgress &progress, void *context);
 NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, NntpProgressFn progressFn,
                         void *context, unsigned long *outMissing, char *error, size_t errorSize);
 
+// One connection, logged in and closed again, for Settings' Test. True if it
+// worked; message says how it went either way, fit for the screen.
+bool NntpTestLogin(const NntpServer &server, char *message, size_t messageSize);
+
 // Where NntpDownload put file `index` of the NZB.
 void NntpFilePath(const char *dir, int index, char *out, size_t outSize);
 

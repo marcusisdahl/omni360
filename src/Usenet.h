@@ -31,7 +31,7 @@
 // The calls here block, and are made from worker threads: searches from
 // SearchWorker's, the NZB from the game installer's.
 
-#define USENET_URL_MAX     1536
+#define USENET_URL_MAX     2048 // Prowlarr's links carry the indexer's, encrypted
 #define USENET_TITLE_MAX   256
 #define USENET_KEY_MAX     96
 #define MAX_USENET_RESULTS 60
@@ -73,11 +73,24 @@ struct UsenetRelease
 int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *out, int maxOut,
                  char *error, size_t errorSize);
 
-// The NZB a release's nzbUrl points at, through Prowlarr: malloc'd and
-// NUL-terminated, for the caller to free. NULL on failure, with error saying
-// why. prowlarrKey goes with the request, in case the URL needs it.
-char *FetchNzb(const char *nzbUrl, const char *prowlarrKey, unsigned long *outLen, char *error,
+// The NZB a release's downloadUrl points at: malloc'd and NUL-terminated,
+// for the caller to free. NULL on failure, with error saying why. The link is
+// Prowlarr's, and for a Usenet indexer Prowlarr redirects it to the indexer's
+// own, which is followed - so the NZB comes from the indexer, over HTTPS. A
+// link to localhost, or with no host, is pointed at prowlarr-url's first; a
+// gzipped NZB is unpacked.
+char *FetchNzb(const UsenetConfig &config, const char *downloadUrl, unsigned long *outLen, char *error,
                size_t errorSize);
+
+// Asks Prowlarr for its indexers, for Settings' Test: how many enabled
+// Usenet ones it has, or -1 if it couldn't be reached or refused the key.
+// message says which, fit for the screen.
+int UsenetTestProwlarr(const UsenetConfig &config, char *message, size_t messageSize);
+
+// What's typed for Prowlarr's address, as a URL: "192.168.1.10" becomes
+// "http://192.168.1.10:9696"; one with a scheme or port is kept, without a
+// trailing slash.
+void UsenetNormaliseProwlarrUrl(const char *typed, char *out, size_t outSize);
 
 // Whether a downloaded file is a disc image to install as it is: an .iso, or
 // anything a gigabyte or more that isn't an archive, par2 or video file.

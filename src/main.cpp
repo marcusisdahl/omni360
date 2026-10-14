@@ -1307,7 +1307,17 @@ enum SettingsRow
     SETTINGS_ROW_UPDATE_CHECKS, // checking at start, on or off
     SETTINGS_ROW_LIBRARY_FOLDER, // one of g_folderRows: A adds or removes it
     SETTINGS_ROW_ADD_FOLDER,   // another library folder, typed
-    SETTINGS_ROW_SOUNDS        // the interface's sounds, on or off
+    SETTINGS_ROW_SOUNDS,       // the interface's sounds, on or off
+
+    // Usenet (Usenet.h): each typed, or toggled, into settings.txt
+    SETTINGS_ROW_PROWLARR_ADDRESS,
+    SETTINGS_ROW_PROWLARR_KEY,
+    SETTINGS_ROW_PROWLARR_TEST,       // asks Prowlarr for its indexers
+    SETTINGS_ROW_USENET_SERVER,       // the provider's host, and port if typed
+    SETTINGS_ROW_USENET_LOGIN,        // user name, then password
+    SETTINGS_ROW_USENET_TLS,
+    SETTINGS_ROW_USENET_CONNECTIONS,  // a value: left and right change it
+    SETTINGS_ROW_USENET_TEST          // logs in once
 };
 
 // Rescans with the library folders now in settings.txt.
@@ -1635,7 +1645,7 @@ static void RemoveKeys(SettingsOutcome &outcome)
 // folders under a heading with Add folder and Change install folder, then
 // one line a setting. Rebuilt whenever something may have changed it, rather
 // than every frame - each rebuild reads the keys file.
-#define MAX_SETTINGS_ROWS (8 + MAX_FOLDER_ROWS)
+#define MAX_SETTINGS_ROWS (12 + MAX_FOLDER_ROWS)
 #define SETTINGS_MIDDOT "  \xC2\xB7  "
 
 struct SettingsPage
@@ -1651,6 +1661,9 @@ struct SettingsPage
     char keysStatus[64];
     char updatesStatus[96];
     char updatesHelp[96];
+    char prowlarrStatus[160];
+    char serverStatus[160];
+    char connectionsValue[8];
 
     int focusRow;
     int focusCol;
@@ -1830,6 +1843,61 @@ static void BuildSettingsPage(SettingsPage &page, const Library &lib, const char
                        "A soft tick as you move around, and a sound for A and B.");
     page.rows[page.count - 1].controls[0].on = UiSoundsSetting();
 
+    // --- Usenet: Prowlarr to search, a provider to download from ---
+    // Keys show only their first characters, and the password never.
+    UsenetConfig usenet;
+    LoadUsenetConfig(&usenet);
+    AddSettingsRow(page, SETTINGS_VIEW_HEADING, "Usenet");
+
+    if (usenet.prowlarrUrl[0] == '\0')
+        _snprintf(page.prowlarrStatus, sizeof(page.prowlarrStatus), "Not set" SETTINGS_MIDDOT "searches from the Store");
+    else
+    {
+        char shown[5] = "";
+        strncpy(shown, usenet.prowlarrKey, 4);
+        shown[4] = '\0';
+        _snprintf(page.prowlarrStatus, sizeof(page.prowlarrStatus), "%s" SETTINGS_MIDDOT "%s%s%s", usenet.prowlarrUrl,
+                  shown[0] != '\0' ? "key " : "no API key", shown, shown[0] != '\0' ? "\xE2\x80\xA6" : "");
+    }
+    page.prowlarrStatus[sizeof(page.prowlarrStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Prowlarr").status = page.prowlarrStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Address", SETTINGS_ROW_PROWLARR_ADDRESS,
+                       "Where Prowlarr is, like 192.168.1.10 - its port, 9696, is added if you leave it out.");
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "API key", SETTINGS_ROW_PROWLARR_KEY,
+                       "From Prowlarr's Settings > General > Security.");
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Test", SETTINGS_ROW_PROWLARR_TEST,
+                       "Asks Prowlarr for its indexers - and says how many Usenet ones are on.");
+
+    if (usenet.server.host[0] == '\0')
+        _snprintf(page.serverStatus, sizeof(page.serverStatus), "Not set" SETTINGS_MIDDOT "your Usenet provider");
+    else
+        _snprintf(page.serverStatus, sizeof(page.serverStatus), "%s:%u" SETTINGS_MIDDOT "%s", usenet.server.host,
+                  (unsigned)usenet.server.port, usenet.server.user[0] != '\0' ? usenet.server.user : "no login");
+    page.serverStatus[sizeof(page.serverStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Usenet server").status = page.serverStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Server", SETTINGS_ROW_USENET_SERVER,
+                       "Your provider's news server, like news.example.com - add :port for one that isn't the usual.");
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Login", SETTINGS_ROW_USENET_LOGIN,
+                       "Your provider's user name, then password. The keyboard shows what's typed.");
+    AddSettingsControl(page, SETTINGS_CONTROL_CHECK, "TLS", SETTINGS_ROW_USENET_TLS,
+                       "Encrypted, on port 563. Off is plain NNTP on 119: lighter on the 360, but the login isn't hidden.");
+    page.rows[page.count - 1].controls[2].on = usenet.server.ssl;
+
+    _snprintf(page.connectionsValue, sizeof(page.connectionsValue), "%d", usenet.server.connections);
+    page.connectionsValue[sizeof(page.connectionsValue) - 1] = '\0';
+    // Test first: left and right on a value change it, so a button after it
+    // could never be reached.
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Connections");
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Test", SETTINGS_ROW_USENET_TEST,
+                       "Connects to the server and logs in, once.");
+    AddSettingsControl(page, SETTINGS_CONTROL_VALUE, page.connectionsValue, SETTINGS_ROW_USENET_CONNECTIONS,
+                       "How many downloads at once - left and right change it. Stay within your plan's limit.");
+    {
+        SettingsControlView &c = page.rows[page.count - 1].controls[1];
+        c.valueIndex = usenet.server.connections - 1;
+        c.valueCount = NNTP_MAX_CONNECTIONS;
+    }
+
     // The focus where it was, on a row that's still there.
     if (page.focusRow > page.count - 1)
         page.focusRow = page.count - 1;
@@ -1856,6 +1924,154 @@ static void StepSettingsRow(SettingsPage &page, int direction)
     }
 }
 
+// ---------------------------------------------------------------------------
+// The Usenet settings - see Usenet.h. Each is written to settings.txt as
+// typed, and read back from it when a search or a job starts.
+// ---------------------------------------------------------------------------
+
+#define PROWLARR_URL_KEY "prowlarr-url: "
+#define PROWLARR_KEY_KEY "prowlarr-key: "
+#define USENET_HOST_KEY  "usenet-host: "
+#define USENET_PORT_KEY  "usenet-port: "
+#define USENET_SSL_KEY   "usenet-ssl: "
+#define USENET_USER_KEY  "usenet-user: "
+#define USENET_PASS_KEY  "usenet-pass: "
+#define USENET_CONNECTIONS_KEY "usenet-connections: "
+
+static void SaveSetting(const char *key, const char *value)
+{
+    if (!SetSettingsValue(key, value))
+        ShowMessageUI("Not saved", "settings.txt could not be written.", NULL);
+}
+
+// The keyboard, starting from current. False if it was cancelled.
+static bool TypeSetting(LPCWSTR title, LPCWSTR description, const char *current, std::string &typed)
+{
+    WCHAR before[256];
+    NarrowToWide(current, before, 256);
+    if (OpenKeyboardToString(XUSER_INDEX_ANY, &typed, title, description, before) != ERROR_SUCCESS)
+        return false;
+    TrimInPlace(typed);
+    return true;
+}
+
+static void ChangeProwlarrAddress()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    std::string typed;
+    if (!TypeSetting(L"Prowlarr's address", L"Its IP address on your network, like 192.168.1.10 - or a full URL",
+                     config.prowlarrUrl, typed) ||
+        typed.empty())
+        return;
+    char url[256];
+    UsenetNormaliseProwlarrUrl(typed.c_str(), url, sizeof(url));
+    SaveSetting(PROWLARR_URL_KEY, url);
+}
+
+static void ChangeProwlarrKey()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    std::string typed;
+    if (TypeSetting(L"Prowlarr's API key", L"From Prowlarr: Settings > General > Security > API Key",
+                    config.prowlarrKey, typed) &&
+        !typed.empty())
+        SaveSetting(PROWLARR_KEY_KEY, typed.c_str());
+}
+
+static void TestProwlarr()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    if (config.prowlarrUrl[0] == '\0' || config.prowlarrKey[0] == '\0')
+    {
+        ShowMessageUI("Prowlarr", "Set its address and API key first.", NULL);
+        return;
+    }
+    RenderStatusFrame("Prowlarr", "Checking Prowlarr\xE2\x80\xA6", config.prowlarrUrl);
+    char message[160];
+    const int indexers = UsenetTestProwlarr(config, message, sizeof(message));
+    ShowMessageUI(indexers > 0 ? "Prowlarr is ready" : "Prowlarr", message, config.prowlarrUrl);
+}
+
+static void ChangeUsenetServer()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    std::string typed;
+    if (!TypeSetting(L"Usenet server", L"Your provider's news server, like news.example.com - :port after it if needed",
+                     config.server.host, typed) ||
+        typed.empty())
+        return;
+
+    // "host:port" - the port saved on its own.
+    const size_t colon = typed.rfind(':');
+    if (colon != std::string::npos && colon + 1 < typed.length() &&
+        typed.find_first_not_of("0123456789", colon + 1) == std::string::npos)
+    {
+        SaveSetting(USENET_PORT_KEY, typed.substr(colon + 1).c_str());
+        typed.erase(colon);
+    }
+    SaveSetting(USENET_HOST_KEY, typed.c_str());
+}
+
+static void ChangeUsenetLogin()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    std::string user, pass;
+    if (!TypeSetting(L"Usenet user name", L"Your provider's user name", config.server.user, user))
+        return;
+    // The password starts empty rather than showing the saved one.
+    if (!TypeSetting(L"Usenet password", L"Your provider's password - shown as it's typed", "", pass) || pass.empty())
+        return;
+    SaveSetting(USENET_USER_KEY, user.c_str());
+    SaveSetting(USENET_PASS_KEY, pass.c_str());
+}
+
+static void ToggleUsenetTls()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    const bool on = !config.server.ssl;
+    SaveSetting(USENET_SSL_KEY, on ? "on" : "off");
+    // The usual port goes with it; any other was chosen, and stays.
+    if (config.server.port == (on ? 119 : 563))
+        SaveSetting(USENET_PORT_KEY, on ? "563" : "119");
+}
+
+static void StepUsenetConnections(int step)
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    const int connections = config.server.connections + step;
+    if (connections < 1 || connections > NNTP_MAX_CONNECTIONS)
+        return;
+    char value[8];
+    _snprintf(value, sizeof(value), "%d", connections);
+    value[sizeof(value) - 1] = '\0';
+    SaveSetting(USENET_CONNECTIONS_KEY, value);
+}
+
+static void TestUsenetLogin()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    if (config.server.host[0] == '\0')
+    {
+        ShowMessageUI("Usenet server", "Set your provider's server first.", NULL);
+        return;
+    }
+    char where[300];
+    _snprintf(where, sizeof(where), "%s:%u", config.server.host, (unsigned)config.server.port);
+    where[sizeof(where) - 1] = '\0';
+    RenderStatusFrame("Usenet server", "Logging in\xE2\x80\xA6", where);
+    char message[200];
+    const bool ok = NntpTestLogin(config.server, message, sizeof(message));
+    ShowMessageUI(ok ? "Usenet server is ready" : "Usenet server", message, where);
+}
+
 static SettingsOutcome RunSettingsRow(SettingsRow row, int arg, Library &lib, char *gamesPath, size_t gamesPathSize)
 {
     SettingsOutcome outcome = {false, false};
@@ -1870,7 +2086,14 @@ static SettingsOutcome RunSettingsRow(SettingsRow row, int arg, Library &lib, ch
     case SETTINGS_ROW_LIBRARY_FOLDER: ToggleLibraryFolder(arg, lib, gamesPath, outcome); break;
     case SETTINGS_ROW_ADD_FOLDER:   AddLibraryFolder(lib, gamesPath, outcome); break;
     case SETTINGS_ROW_SOUNDS:       ToggleUiSounds(); break;
-    default:                        break;
+    case SETTINGS_ROW_PROWLARR_ADDRESS: ChangeProwlarrAddress(); break;
+    case SETTINGS_ROW_PROWLARR_KEY:     ChangeProwlarrKey(); break;
+    case SETTINGS_ROW_PROWLARR_TEST:    TestProwlarr(); break;
+    case SETTINGS_ROW_USENET_SERVER:    ChangeUsenetServer(); break;
+    case SETTINGS_ROW_USENET_LOGIN:     ChangeUsenetLogin(); break;
+    case SETTINGS_ROW_USENET_TLS:       ToggleUsenetTls(); break;
+    case SETTINGS_ROW_USENET_TEST:      TestUsenetLogin(); break;
+    default:                        break; // SETTINGS_ROW_USENET_CONNECTIONS: left and right, not A
     }
 
     return outcome;
@@ -5073,7 +5296,10 @@ int main()
                 const bool right = (input.nav == XINPUT_GAMEPAD_DPAD_RIGHT);
                 if (onValue)
                 {
-                    StepDiscSpeed(right ? 1 : -1);
+                    if (settings.actions[settings.focusRow][settings.focusCol] == SETTINGS_ROW_USENET_CONNECTIONS)
+                        StepUsenetConnections(right ? 1 : -1);
+                    else
+                        StepDiscSpeed(right ? 1 : -1);
                     shell.stale = true;
                 }
                 else if (right && row->kind != SETTINGS_VIEW_FOLDER && settings.focusCol + 1 < row->controlCount)

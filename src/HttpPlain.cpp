@@ -3,6 +3,7 @@
 #include "downloadFile.h"
 #include "dns.h"
 #include "OutputConsole.h"
+#include "parsing.h" // LogEscapePercent
 
 #include <xtl.h>
 #include <stdio.h>
@@ -13,6 +14,14 @@
 #define XBOX_SO_BYPASS_SECURITY 0x5801
 #define PLAIN_IO_TIMEOUT_MS     (30 * 1000) // small replies - a stall is a failure well before XboxTLS's 2 minutes
 #define PLAIN_MAX_REDIRECTS     4
+
+// A URL as the log can take it, keys hidden - see LogEscapePercent.
+static std::string SafeUrl(const char *url)
+{
+    char safe[1024];
+    LogEscapePercent(url, safe, sizeof(safe));
+    return safe;
+}
 
 static int SocketRead(void *context, char *buf, int len)
 {
@@ -62,14 +71,14 @@ static bool SplitUrl(const char *url, char *host, size_t hostSize, unsigned shor
 
 // One request on its own connection. *location gets a redirect's target.
 static int GetOnce(const char *url, const char *extraHeaderLines, char *buffer, unsigned long long capacity,
-                   unsigned long long *outLen, std::string *location)
+                   unsigned long long *outLen, std::string *location, unsigned long ioTimeoutMs)
 {
     char host[256];
     unsigned short port = 80;
     std::string path;
     if (!SplitUrl(url, host, sizeof(host), &port, &path))
     {
-        dprintf("[http] not an http:// URL: %s\n", url);
+        dprintf("[http] not an http:// URL: %s\n", SafeUrl(url).c_str());
         return 0;
     }
 
@@ -92,7 +101,7 @@ static int GetOnce(const char *url, const char *extraHeaderLines, char *buffer, 
         return 0;
 
     BOOL yes = TRUE;
-    DWORD timeoutMs = PLAIN_IO_TIMEOUT_MS;
+    DWORD timeoutMs = ioTimeoutMs;
     setsockopt(s, SOL_SOCKET, XBOX_SO_BYPASS_SECURITY, (PCSTR)&yes, sizeof(yes));
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (PCSTR)&yes, sizeof(yes));
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (PCSTR)&timeoutMs, sizeof(timeoutMs));
@@ -144,7 +153,7 @@ static int GetOnce(const char *url, const char *extraHeaderLines, char *buffer, 
                 {
                     if (response->bodyOverflow)
                     {
-                        dprintf("[http] %s: larger than %I64u bytes\n", url, capacity);
+                        dprintf("[http] %s: larger than %I64u bytes\n", SafeUrl(url).c_str(), capacity);
                         status = -1;
                     }
                     else
@@ -159,7 +168,8 @@ static int GetOnce(const char *url, const char *extraHeaderLines, char *buffer, 
             }
             else
             {
-                dprintf("[http] %s: the response couldn't be read (status %d)\n", url, response->status);
+                dprintf("[http] %s: the response couldn't be read (status %d)\n", SafeUrl(url).c_str(),
+                        response->status);
                 status = 0;
             }
         }
@@ -172,6 +182,12 @@ static int GetOnce(const char *url, const char *extraHeaderLines, char *buffer, 
 
 int HttpGetPlain(const char *url, const char *extraHeaderLines, char *buffer,
                  unsigned long long capacity, unsigned long long *outLen)
+{
+    return HttpGetPlainWaiting(url, extraHeaderLines, buffer, capacity, outLen, PLAIN_IO_TIMEOUT_MS);
+}
+
+int HttpGetPlainWaiting(const char *url, const char *extraHeaderLines, char *buffer,
+                        unsigned long long capacity, unsigned long long *outLen, unsigned long ioTimeoutMs)
 {
     if (url == NULL || buffer == NULL || outLen == NULL)
         return 0;
@@ -207,7 +223,7 @@ int HttpGetPlain(const char *url, const char *extraHeaderLines, char *buffer,
         }
 
         std::string location;
-        status = GetOnce(current.c_str(), extraHeaderLines, buffer, capacity, outLen, &location);
+        status = GetOnce(current.c_str(), extraHeaderLines, buffer, capacity, outLen, &location, ioTimeoutMs);
         if (location.empty())
             break;
 

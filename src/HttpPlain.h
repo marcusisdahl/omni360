@@ -17,4 +17,10 @@
 int HttpGetPlain(const char *url, const char *extraHeaderLines, char *buffer,
                  unsigned long long capacity, unsigned long long *outLen);
 
+// The same, waiting up to ioTimeoutMs for the server to send anything, where
+// HttpGetPlain gives up after 30 seconds - for a server that thinks before it
+// answers, as Prowlarr does while it asks every indexer.
+int HttpGetPlainWaiting(const char *url, const char *extraHeaderLines, char *buffer,
+                        unsigned long long capacity, unsigned long long *outLen, unsigned long ioTimeoutMs);
+
 #endif

@@ -11,6 +11,7 @@ DESCRIPTION : Searching Prowlarr, fetching the chosen NZB, and the Usenet
 #include "parsing.h"     // UrlEncodeFormValue, LogEscapePercent
 #include "cJSON.h"
 #include "OutputConsole.h"
+#include "zlib/zlib.h"   // a gzipped NZB
 
 #include <xtl.h>
 #include <stdio.h>
@@ -24,6 +25,9 @@ DESCRIPTION : Searching Prowlarr, fetching the chosen NZB, and the Usenet
 #define NZB_MAX            (16UL * 1024 * 1024)
 #define MAX_HOPS           4
 #define DEFAULT_CONNECTIONS 8
+#define PROWLARR_PORT      "9696"
+#define SEARCH_WAIT_MS     (120UL * 1000) // Prowlarr answers once every indexer has, or timed out
+#define NZB_WAIT_MS        (90UL * 1000)  // it fetches the NZB from the indexer before sending any of it
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -70,9 +74,10 @@ static std::string HostOf(const char *url)
 // A GET into buffer, over plain HTTP - Prowlarr on the local network, as a
 // rule - or HTTPS, following redirects. Returns the HTTP status; on 200 the
 // body is in buffer, NUL-terminated, with its length in *outLen. buffer needs
-// room for capacity + 1 bytes.
+// room for capacity + 1 bytes. waitMs is how long the server may take to
+// start answering over plain HTTP.
 static int FetchUrl(const char *url, const char *headers, char *buffer, unsigned long long capacity,
-                    unsigned long long *outLen)
+                    unsigned long long *outLen, unsigned long waitMs)
 {
     *outLen = 0;
     std::string current = url;
@@ -80,8 +85,18 @@ static int FetchUrl(const char *url, const char *headers, char *buffer, unsigned
     {
         if (_strnicmp(current.c_str(), "http://", 7) == 0)
         {
-            // HttpGetPlain follows redirects itself.
-            return HttpGetPlain(current.c_str(), headers, buffer, capacity, outLen);
+            // HttpGetPlain follows plain redirects itself; one that went on
+            // to HTTPS and was redirected again hands its target back.
+            const int status = HttpGetPlainWaiting(current.c_str(), headers, buffer, capacity, outLen, waitMs);
+            if (status == 302 && _strnicmp(buffer, "http", 4) == 0)
+            {
+                current = buffer;
+                headers = NULL; // a key for one host isn't for the next
+                continue;
+            }
+            if (status == 200 && *outLen <= capacity)
+                buffer[*outLen] = '\0';
+            return status;
         }
 
         HttpsSession *session = HttpsSessionOpen(dprintf);
@@ -94,6 +109,7 @@ static int FetchUrl(const char *url, const char *headers, char *buffer, unsigned
         if (status == 302)
         {
             current = std::string(buffer, (size_t)len);
+            headers = NULL;
             continue;
         }
         if (status == 200)
@@ -109,6 +125,27 @@ static int FetchUrl(const char *url, const char *headers, char *buffer, unsigned
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
+
+void UsenetNormaliseProwlarrUrl(const char *typed, char *out, size_t outSize)
+{
+    std::string url = typed;
+    while (!url.empty() && (url[0] == ' ' || url[0] == '\t'))
+        url.erase(0, 1);
+    while (!url.empty() && (url[url.length() - 1] == ' ' || url[url.length() - 1] == '\t' ||
+                            url[url.length() - 1] == '/'))
+        url.erase(url.length() - 1);
+
+    // "192.168.1.10" is Prowlarr on its own port, over plain HTTP.
+    if (!url.empty() && url.find("://") == std::string::npos)
+    {
+        const bool hasPort = url.find(':') != std::string::npos;
+        const bool hasPath = url.find('/') != std::string::npos;
+        url = "http://" + url;
+        if (!hasPort && !hasPath)
+            url += ":" PROWLARR_PORT;
+    }
+    CopyText(out, outSize, url.c_str());
+}
 
 static bool ReadSetting(const char *line, const char *key, char *out, size_t outSize)
 {
@@ -154,9 +191,12 @@ UsenetSetup LoadUsenetConfig(UsenetConfig *out)
         fclose(f);
     }
 
-    size_t n = strlen(out->prowlarrUrl);
-    while (n > 0 && out->prowlarrUrl[n - 1] == '/')
-        out->prowlarrUrl[--n] = '\0';
+    if (out->prowlarrUrl[0] != '\0')
+    {
+        char typed[sizeof(out->prowlarrUrl)];
+        CopyText(typed, sizeof(typed), out->prowlarrUrl);
+        UsenetNormaliseProwlarrUrl(typed, out->prowlarrUrl, sizeof(out->prowlarrUrl));
+    }
 
     out->server.ssl = !(_stricmp(ssl, "off") == 0 || _stricmp(ssl, "no") == 0 || strcmp(ssl, "0") == 0);
     const int p = atoi(port);
@@ -243,7 +283,7 @@ int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *o
     ApiKeyHeader(config.prowlarrKey, headers, sizeof(headers));
 
     unsigned long long len = 0;
-    const int status = FetchUrl(url.c_str(), headers, buffer, SEARCH_REPLY_MAX, &len);
+    const int status = FetchUrl(url.c_str(), headers, buffer, SEARCH_REPLY_MAX, &len, SEARCH_WAIT_MS);
     int n = -1;
     if (status == 401 || status == 403)
         SetError(error, errorSize, "Prowlarr refused the API key - check prowlarr-key: in settings.txt.");
@@ -304,7 +344,79 @@ int UsenetSearch(const UsenetConfig &config, const char *query, UsenetRelease *o
     return n;
 }
 
-char *FetchNzb(const char *nzbUrl, const char *prowlarrKey, unsigned long *outLen, char *error, size_t errorSize)
+static bool IsLoopbackHost(const std::string &hostAndPort)
+{
+    std::string host = hostAndPort;
+    if (!host.empty() && host[0] == '[')
+        host = host.substr(0, host.find(']') + 1); // [::1]:9696
+    else if (host.find(':') != std::string::npos)
+        host = host.substr(0, host.find(':'));
+    return _stricmp(host.c_str(), "localhost") == 0 || host == "127.0.0.1" || host == "0.0.0.0" || host == "[::1]";
+}
+
+// The release's downloadUrl, made reachable from the console. Prowlarr builds
+// it from the address it was asked on, so it's normally right as it is; but
+// a Prowlarr behind a proxy, or set up with its own URL, can hand back a
+// link to localhost, or one with no host at all.
+static std::string ReachableNzbUrl(const UsenetConfig &config, const char *downloadUrl)
+{
+    const std::string base = config.prowlarrUrl;
+    if (downloadUrl[0] == '/')
+        return base + downloadUrl;
+
+    const char *scheme = strstr(downloadUrl, "://");
+    if (scheme == NULL)
+        return base + "/" + downloadUrl;
+    const char *hostStart = scheme + 3;
+    const char *rest = hostStart;
+    while (*rest != '\0' && *rest != '/' && *rest != '?')
+        rest++;
+    if (IsLoopbackHost(std::string(hostStart, rest - hostStart)))
+    {
+        // Prowlarr's own address, with whatever base path it was given.
+        const char *baseHostStart = strstr(base.c_str(), "://") + 3;
+        const char *basePath = strchr(baseHostStart, '/');
+        const std::string origin = basePath != NULL ? base.substr(0, basePath - base.c_str()) : base;
+        return origin + rest;
+    }
+    return downloadUrl;
+}
+
+// A gzipped NZB, in place - some indexers send them that way, whatever was
+// asked for. False if it doesn't unpack into NZB_MAX.
+static bool Gunzip(char **buffer, unsigned long long *len)
+{
+    char *out = (char *)malloc(NZB_MAX + 1);
+    if (out == NULL)
+        return false;
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK)
+    {
+        free(out);
+        return false;
+    }
+    zs.next_in = (Bytef *)*buffer;
+    zs.avail_in = (uInt)*len;
+    zs.next_out = (Bytef *)out;
+    zs.avail_out = (uInt)NZB_MAX;
+    const int r = inflate(&zs, Z_FINISH);
+    const unsigned long outLen = zs.total_out;
+    inflateEnd(&zs);
+    if (r != Z_STREAM_END)
+    {
+        free(out);
+        return false;
+    }
+    out[outLen] = '\0';
+    free(*buffer);
+    *buffer = out;
+    *len = outLen;
+    return true;
+}
+
+char *FetchNzb(const UsenetConfig &config, const char *downloadUrl, unsigned long *outLen, char *error,
+               size_t errorSize)
 {
     *outLen = 0;
     char *buffer = (char *)malloc(NZB_MAX + 1);
@@ -314,19 +426,36 @@ char *FetchNzb(const char *nzbUrl, const char *prowlarrKey, unsigned long *outLe
         return NULL;
     }
 
-    char headers[160];
-    ApiKeyHeader(prowlarrKey, headers, sizeof(headers));
+    // For a Usenet indexer, Prowlarr's link doesn't hand over the NZB: it
+    // records the grab and answers 301 with the indexer's own link, and the
+    // NZB comes from the indexer - over HTTPS, so its certificate has to
+    // chain to a root in TrustAnchors.h. The link carries Prowlarr's key
+    // itself, so no header is sent: one would follow the redirect to the
+    // indexer.
+    const std::string url = ReachableNzbUrl(config, downloadUrl);
+    const std::string host = HostOf(url.c_str());
+
     unsigned long long len = 0;
-    const int status = FetchUrl(nzbUrl, headers, buffer, NZB_MAX, &len);
-    const std::string host = HostOf(nzbUrl);
+    const int status = FetchUrl(url.c_str(), NULL, buffer, NZB_MAX, &len, NZB_WAIT_MS);
     if (status != 200)
     {
         if (status <= 0)
-            SetError(error, errorSize, "Couldn't reach %s for the NZB.", host.c_str());
+            SetError(error, errorSize, "Couldn't get the NZB from %s or the indexer it points to.", host.c_str());
         else if (status == 429)
-            SetError(error, errorSize, "The indexer's API limit has been reached.");
+            SetError(error, errorSize, "The indexer's download limit has been reached - see Prowlarr.");
+        else if (status == 410)
+            SetError(error, errorSize, "Prowlarr says the indexer is disabled, or the release is gone.");
+        else if (status == 401 || status == 403)
+            SetError(error, errorSize, "The NZB download was refused (HTTP %d) - check the keys in Prowlarr.", status);
         else
-            SetError(error, errorSize, "Getting the NZB: HTTP %d from %s.", status, host.c_str());
+            SetError(error, errorSize, "Getting the NZB: HTTP %d.", status);
+        free(buffer);
+        return NULL;
+    }
+
+    if (len >= 2 && (unsigned char)buffer[0] == 0x1F && (unsigned char)buffer[1] == 0x8B && !Gunzip(&buffer, &len))
+    {
+        SetError(error, errorSize, "The NZB from %s couldn't be unpacked.", host.c_str());
         free(buffer);
         return NULL;
     }
@@ -341,6 +470,63 @@ char *FetchNzb(const char *nzbUrl, const char *prowlarrKey, unsigned long *outLe
     *outLen = (unsigned long)len;
     dprintf("[usenet] NZB from %s: %lu bytes\n", host.c_str(), *outLen);
     return shrunk != NULL ? shrunk : buffer;
+}
+
+int UsenetTestProwlarr(const UsenetConfig &config, char *message, size_t messageSize)
+{
+    char *buffer = (char *)malloc(SEARCH_REPLY_MAX + 1);
+    if (buffer == NULL)
+    {
+        SetError(message, messageSize, "Out of memory.");
+        return -1;
+    }
+    char headers[160];
+    ApiKeyHeader(config.prowlarrKey, headers, sizeof(headers));
+    unsigned long long len = 0;
+    const std::string url = std::string(config.prowlarrUrl) + "/api/v1/indexer";
+    const int status = FetchUrl(url.c_str(), headers, buffer, SEARCH_REPLY_MAX, &len, 30000);
+
+    int usenet = -1;
+    if (status == 401 || status == 403)
+        SetError(message, messageSize, "Prowlarr is there, but refused the API key.");
+    else if (status <= 0)
+        SetError(message, messageSize, "Couldn't reach Prowlarr at %s.", HostOf(config.prowlarrUrl).c_str());
+    else if (status != 200)
+        SetError(message, messageSize, "%s answered HTTP %d - is that Prowlarr?", HostOf(config.prowlarrUrl).c_str(),
+                 status);
+    else
+    {
+        cJSON *root = cJSON_Parse(buffer);
+        if (!cJSON_IsArray(root))
+            SetError(message, messageSize, "%s answered, but not as Prowlarr does.", HostOf(config.prowlarrUrl).c_str());
+        else
+        {
+            usenet = 0;
+            int other = 0;
+            for (int i = 0; i < cJSON_GetArraySize(root); ++i)
+            {
+                const cJSON *indexer = cJSON_GetArrayItem(root, i);
+                const cJSON *protocol = cJSON_GetObjectItemCaseSensitive(indexer, "protocol");
+                if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(indexer, "enable")))
+                    continue;
+                if (cJSON_IsString(protocol) && strcmp(protocol->valuestring, "usenet") == 0)
+                    usenet++;
+                else
+                    other++;
+            }
+            if (usenet > 0)
+                SetError(message, messageSize, "Connected - %d Usenet indexer%s enabled.", usenet,
+                         usenet == 1 ? "" : "s");
+            else
+                SetError(message, messageSize,
+                         "Connected, but no Usenet indexer is enabled in it%s. Add one in Prowlarr.",
+                         other > 0 ? " - only torrent ones" : "");
+        }
+        cJSON_Delete(root);
+    }
+    free(buffer);
+    dprintf("[usenet] Prowlarr test: %s\n", ForLog(message).c_str());
+    return usenet;
 }
 
 // ---------------------------------------------------------------------------
