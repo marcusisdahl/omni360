@@ -334,7 +334,7 @@
          it is not. selawk.ttf itself is unmodified, so it keeps its name. -->
     <CustomBuild Include="Media\Fonts\uifont_16.rdf">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">bundler "%(FullPath)" -o "$(OutDir)Media\Fonts\font.xpr"</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">"$(XEDK)\bin\win32\bundler.exe" "%(FullPath)" -o "$(OutDir)Media\Fonts\font.xpr"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">$(OutDir)Media\Fonts\font.xpr</Outputs>
     </CustomBuild>
     <None Include="SSL\codec\pemdec.t0" />

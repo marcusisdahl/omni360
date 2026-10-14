@@ -50,3 +50,6 @@ __pycache__/
 # Usenet test data and build (tools/test_usenet)
 tools/test_usenet/build/
 tools/test_usenet/data/
+
+# build.ps1 output
+dist/

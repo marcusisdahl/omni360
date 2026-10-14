@@ -1,0 +1,24 @@
+# Omni360 settings - rename to settings.txt and put it beside Omni360.xex.
+# Every line is optional; a line starting with # is ignored. The games folder
+# and everything under Usenet can also be set on the console, in Settings,
+# which writes this file.
+
+# Where games install, and where your library is scanned. More games-path:
+# lines add more folders to the library.
+# games-path: Hdd1:\Content\0000000000000000
+# xbla-path: Hdd1:\Content\0000000000000000
+
+# --- Usenet (Store > Usenet) ---------------------------------------------
+# Prowlarr, on a PC or NAS the console can reach: its IP address, and its
+# API key from Settings > General > Security.
+# prowlarr-url: http://192.168.1.10:9696
+# prowlarr-key: 0123456789abcdef0123456789abcdef
+# usenet-categories: 1000,1050
+
+# Your Usenet provider.
+# usenet-host: news.example.com
+# usenet-user: your-user-name
+# usenet-pass: your-password
+# usenet-ssl: on
+# usenet-port: 563
+# usenet-connections: 8

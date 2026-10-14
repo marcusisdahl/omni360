@@ -16,6 +16,18 @@ Sadly, there is extremely little information around creating native Xbox 360 pro
 5. Once everything has built successfully, navigate to the *Release* folder using file explorer. In this folder you should find *Omni360.xex*. Transfer this to your console and launch it. See `docs/Setup Guide.md` for what else needs to go alongside it.
 6. To view the standard output of the Xbox, you will need to use a program on your PC called Xbox Watson. It is quite buggy, but it is what Microsoft provided developers with. To prevent some of the bugs, the program can be run in Windows 7 compatability mode.
 
+## From the command line (Visual Studio 2022 with RXDK-360, or 2010)
+
+`build.ps1` builds the whole solution - the ATG framework, then Omni360 - with the newest Visual Studio's MSBuild and the SDK in `XEDK`, and copies `Omni360.xex` and a `settings.txt` template into `dist\`:
+
+```
+.\build.ps1            # build
+.\build.ps1 -Clean     # rebuild everything
+.\build.ps1 -Tests     # and build and run tools\test_usenet on the PC
+```
+
+It passes `DeploymentType=None`, so nothing is copied to a dev kit - the step that otherwise fails with `xbecopy : error X1001: Could not connect to Xbox 360` on a machine without one.
+
 ## Issues
 
 * HELP! It won't compile!
