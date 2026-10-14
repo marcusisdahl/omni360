@@ -23,6 +23,7 @@ DESCRIPTION : Downloads a Redump game's zip from archive.org and installs it as
 #include "Nzb.h"
 #include "Nntp.h"
 #include "RarVolumes.h"     // its image, out of stored RAR volumes
+#include "Par2.h"           // and its repair, when articles were missing
 #include "StoreCatalog.h"   // StoreGameByTitleId, for its name
 
 #include <xtl.h>
@@ -1566,21 +1567,28 @@ struct RarVolumeFile
 
 static bool ByOrder(const RarVolumeFile &a, const RarVolumeFile &b) { return a.order < b.order; }
 
+// A downloaded file: its real name - the NZB's, or par2's for one posted
+// under a made-up name - and where it is.
+struct DownloadedFile
+{
+    std::string name;
+    std::string path;
+    unsigned long missing; // articles it lacked, before any repair
+};
+
 // The disc images among the downloaded files. When there are none, *problem
 // says why, for the screen.
-static void FindImages(const Nzb &nzb, const char *dir, std::vector<FoundImage> *out, std::string *problem)
+static void FindImages(const std::vector<DownloadedFile> &downloaded, std::vector<FoundImage> *out,
+                       std::string *problem)
 {
     std::vector<std::string> setNames;
     std::vector<std::vector<RarVolumeFile> > sets;
     int files = 0;
 
-    for (int f = 0; f < nzb.fileCount; ++f)
+    for (size_t f = 0; f < downloaded.size(); ++f)
     {
-        const NzbFile &file = nzb.files[f];
-        if (file.par2)
-            continue;
-        char path[320];
-        NntpFilePath(dir, f, path, sizeof(path));
+        const DownloadedFile &file = downloaded[f];
+        const char *path = file.path.c_str();
         const unsigned long long size = FileSize(path);
         if (size == 0)
             continue;
@@ -1588,7 +1596,7 @@ static void FindImages(const Nzb &nzb, const char *dir, std::vector<FoundImage> 
 
         std::string base;
         int order = 0;
-        if (RarVolumeName(file.name, &base, &order))
+        if (RarVolumeName(file.name.c_str(), &base, &order))
         {
             for (size_t i = 0; i < base.length(); ++i)
                 base[i] = (char)tolower((unsigned char)base[i]);
@@ -1605,7 +1613,7 @@ static void FindImages(const Nzb &nzb, const char *dir, std::vector<FoundImage> 
             volume.path = path;
             sets[set].push_back(volume);
         }
-        else if (IsUsenetDiscImage(file.name, size))
+        else if (IsUsenetDiscImage(file.name.c_str(), size))
         {
             FoundImage image;
             image.name = file.name;
@@ -1672,6 +1680,217 @@ static void FindImages(const Nzb &nzb, const char *dir, std::vector<FoundImage> 
         *problem = text;
     }
     std::sort(out->begin(), out->end(), ByName);
+}
+
+// ---------------------------------------------------------------------------
+// par2, for a Usenet download
+// ---------------------------------------------------------------------------
+
+#define PAR2_MEMORY        (48ULL * 1024 * 1024) // slices rebuilt at a time
+#define PAR2_SPARE_BLOCKS  2                     // over what's needed, in case a volume arrives damaged
+#define PAR2_ROUNDS        3                     // of fetching more volumes when some were damaged
+
+enum Par2Outcome
+{
+    PAR2_OUTCOME_OK,
+    PAR2_OUTCOME_FAILED,
+    PAR2_OUTCOME_CANCELLED
+};
+
+// Whether a file is a par2 file, by its first bytes - its name may be made up.
+static bool IsPar2File(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
+        return false;
+    unsigned char head[8];
+    const bool par2 = fread(head, 1, 8, f) == 8 && memcmp(head, "PAR2\0PKT", 8) == 0;
+    fclose(f);
+    return par2;
+}
+
+struct Par2Progress
+{
+    GameJob *job;
+    const char *phase;
+    DWORD started;
+};
+
+static bool Par2ProgressFnForJob(unsigned long long done, unsigned long long total, void *context)
+{
+    Par2Progress *p = (Par2Progress *)context;
+    const DWORD ms = GetTickCount() - p->started;
+    SetPhase(p->job, p->phase, done, total, ms > 3000 ? done * 1000 / ms : 0);
+    return !Cancelled(p->job);
+}
+
+// Names the files from the par2 index, checks the ones that lacked articles
+// against it, fetches as many recovery volumes as the damage needs, and
+// repairs. *files is updated: real names for files posted under made-up
+// ones, and any file rebuilt from nothing added.
+static Par2Outcome RepairWithPar2(GameJob *job, const UsenetConfig &config, Nzb *nzb, const char *dir,
+                                  const std::vector<std::string> &par2Paths, std::vector<DownloadedFile> *files,
+                                  unsigned long dataMissing, char *error, size_t errorSize)
+{
+    SetPhase(job, "Reading the par2 index", 0, 0, 0);
+    Par2Set set;
+    std::string why;
+    if (!Par2ReadSet(par2Paths, &set, &why))
+    {
+        dprintf("[par2] %s\n", why.c_str());
+        if (dataMissing == 0)
+            return PAR2_OUTCOME_OK; // nothing to repair, and the names are as good as they were
+        _snprintf(error, errorSize, "%lu article(s) are missing, and the par2 index couldn't be read.", dataMissing);
+        error[errorSize - 1] = '\0';
+        return PAR2_OUTCOME_FAILED;
+    }
+
+    std::vector<std::string> names, paths;
+    for (size_t i = 0; i < files->size(); ++i)
+    {
+        names.push_back((*files)[i].name);
+        paths.push_back((*files)[i].path);
+    }
+    std::vector<int> match;
+    Par2MatchFiles(set, names, paths, &match);
+
+    // par2's names for files posted under others.
+    std::vector<std::string> parPaths(set.files.size());
+    std::vector<bool> check(set.files.size(), false);
+    unsigned long renamed = 0, absent = 0;
+    for (size_t i = 0; i < set.files.size(); ++i)
+    {
+        const int j = match[i];
+        if (j < 0)
+        {
+            absent++;
+            continue;
+        }
+        DownloadedFile &d = (*files)[j];
+        if (d.name != set.files[i].name)
+        {
+            d.name = set.files[i].name;
+            renamed++;
+        }
+        parPaths[i] = d.path;
+        check[i] = d.missing > 0 || FileSize(d.path.c_str()) != set.files[i].length;
+    }
+    dprintf("[par2] %u file(s), %lu slices of %I64u KB; %lu renamed from par2, %lu not downloaded\n",
+            (unsigned)set.files.size(), set.sliceCount, set.sliceSize / 1024, renamed, absent);
+    if (dataMissing == 0 && absent == 0)
+        return PAR2_OUTCOME_OK;
+
+    // Which slices need rebuilding.
+    Par2Progress progress;
+    progress.job = job;
+    progress.phase = "Checking with par2";
+    progress.started = GetTickCount();
+    std::vector<unsigned long> damaged;
+    if (!Par2FindDamaged(set, parPaths, check, &damaged, Par2ProgressFnForJob, &progress))
+        return PAR2_OUTCOME_CANCELLED;
+    dprintf("[par2] %u damaged slice(s)\n", (unsigned)damaged.size());
+    if (damaged.empty())
+        return PAR2_OUTCOME_OK;
+
+    // A file that never came is made where par2 can fill it.
+    for (size_t i = 0; i < set.files.size(); ++i)
+    {
+        if (!parPaths[i].empty())
+            continue;
+        char path[320];
+        _snprintf(path, sizeof(path), "%s\\R%03u", dir, (unsigned)i);
+        path[sizeof(path) - 1] = '\0';
+        parPaths[i] = path;
+        DownloadedFile d;
+        d.name = set.files[i].name;
+        d.path = path;
+        d.missing = 0;
+        files->push_back(d);
+    }
+
+    // The volumes, smallest first, until they hold enough - and again if
+    // some arrive damaged.
+    std::vector<int> volumes;
+    for (int f = 0; f < nzb->fileCount; ++f)
+    {
+        if (nzb->files[f].par2 && Par2VolumeBlocks(nzb->files[f].name) > 0)
+            volumes.push_back(f);
+    }
+    for (size_t a = 0; a < volumes.size(); ++a)
+    {
+        for (size_t b = a + 1; b < volumes.size(); ++b)
+        {
+            if (Par2VolumeBlocks(nzb->files[volumes[b]].name) < Par2VolumeBlocks(nzb->files[volumes[a]].name))
+                std::swap(volumes[a], volumes[b]);
+        }
+    }
+
+    std::vector<Par2Recovery> recovery;
+    std::vector<std::string> volumePaths(par2Paths);
+    Par2ListRecovery(set, volumePaths, &recovery); // the index may hold some
+    size_t nextVolume = 0;
+    for (int round = 0; round < PAR2_ROUNDS && recovery.size() < damaged.size(); ++round)
+    {
+        for (int f = 0; f < nzb->fileCount; ++f)
+            nzb->files[f].want = false;
+        unsigned long blocks = (unsigned long)recovery.size();
+        int fetching = 0;
+        while (nextVolume < volumes.size() && blocks < damaged.size() + PAR2_SPARE_BLOCKS)
+        {
+            NzbFile &volume = nzb->files[volumes[nextVolume++]];
+            volume.want = true;
+            blocks += Par2VolumeBlocks(volume.name);
+            fetching++;
+        }
+        if (fetching == 0)
+            break;
+
+        dprintf("[par2] fetching %d volume(s) for %u damaged slice(s)\n", fetching, (unsigned)damaged.size());
+        UsenetProgress fetch;
+        fetch.job = job;
+        fetch.started = GetTickCount();
+        unsigned long volumeMissing = 0;
+        const NntpResult r = NntpDownload(config.server, nzb, dir, false, UsenetDownloadProgress, &fetch,
+                                          &volumeMissing, error, errorSize);
+        if (r == NNTP_CANCELLED)
+            return PAR2_OUTCOME_CANCELLED;
+        if (r != NNTP_OK && r != NNTP_INCOMPLETE)
+            return PAR2_OUTCOME_FAILED;
+        for (int f = 0; f < nzb->fileCount; ++f)
+        {
+            if (!nzb->files[f].want)
+                continue;
+            char path[320];
+            NntpFilePath(dir, f, path, sizeof(path));
+            volumePaths.push_back(path);
+        }
+        recovery.clear();
+        Par2ListRecovery(set, volumePaths, &recovery);
+        dprintf("[par2] %u intact recovery slice(s)\n", (unsigned)recovery.size());
+    }
+
+    progress.phase = "Repairing with par2";
+    progress.started = GetTickCount();
+    const Par2Result result = Par2Repair(set, parPaths, damaged, recovery, PAR2_MEMORY, Par2ProgressFnForJob,
+                                         &progress, &why);
+    dprintf("[par2] repair: %d%s%s\n", (int)result, why.empty() ? "" : " - ", why.c_str());
+    if (result == PAR2_CANCELLED)
+        return PAR2_OUTCOME_CANCELLED;
+    if (result == PAR2_NOT_ENOUGH)
+    {
+        _snprintf(error, errorSize, "Too much is missing for its par2 files: %s", why.c_str());
+        error[errorSize - 1] = '\0';
+        return PAR2_OUTCOME_FAILED;
+    }
+    if (result != PAR2_REPAIRED)
+    {
+        _snprintf(error, errorSize, "%s", why.c_str());
+        error[errorSize - 1] = '\0';
+        return PAR2_OUTCOME_FAILED;
+    }
+    for (size_t i = 0; i < files->size(); ++i)
+        (*files)[i].missing = 0;
+    return PAR2_OUTCOME_OK;
 }
 
 static void RunUsenetJob(GameJob *job, const char *gamesPath)
@@ -1742,14 +1961,22 @@ static void RunUsenetJob(GameJob *job, const char *gamesPath)
     }
 
     // --- Download -------------------------------------------------------------
+    // Everything but the par2 volumes: the index .par2 comes along, small as
+    // it is, so the files can be checked - and named, if they were posted
+    // under made-up names. Volumes are fetched only if there's repairing to do.
+    for (int f = 0; f < nzb.fileCount; ++f)
+    {
+        if (nzb.files[f].par2)
+            nzb.files[f].want = (Par2VolumeBlocks(nzb.files[f].name) == 0);
+    }
     UsenetProgress progress;
     progress.job = job;
     progress.started = GetTickCount();
     SetPhase(job, "Connecting", 0, downloadBytes, 0);
     unsigned long missing = 0;
-    const NntpResult downloaded =
-        NntpDownload(config.server, &nzb, dir, UsenetDownloadProgress, &progress, &missing, error, sizeof(error));
-    if (downloaded != NNTP_OK)
+    const NntpResult downloaded = NntpDownload(config.server, &nzb, dir, true, UsenetDownloadProgress, &progress,
+                                               &missing, error, sizeof(error));
+    if (downloaded != NNTP_OK && downloaded != NNTP_INCOMPLETE)
     {
         NzbFree(&nzb);
         RemoveFolder(dir);
@@ -1759,10 +1986,62 @@ static void RunUsenetJob(GameJob *job, const char *gamesPath)
             FinishLocked(job, QUEUE_OUTCOME_FAILED, "Usenet login refused", error, true);
         else if (downloaded == NNTP_WRITE_FAILED)
             FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't write the download", error, true);
-        else if (downloaded == NNTP_INCOMPLETE)
-            FinishLocked(job, QUEUE_OUTCOME_FAILED, "Download incomplete", error, true);
+        else if (downloaded == NNTP_TOO_DAMAGED)
+            FinishLocked(job, QUEUE_OUTCOME_FAILED, "Too much is missing", error, true);
         else
             FinishLocked(job, QUEUE_OUTCOME_FAILED, "Download failed", error, true);
+        return;
+    }
+
+    // What came: the par2 files - known by their first bytes, whatever
+    // they're called - and the rest.
+    std::vector<DownloadedFile> files;
+    std::vector<std::string> par2Paths;
+    unsigned long dataMissing = 0;
+    for (int f = 0; f < nzb.fileCount; ++f)
+    {
+        const NzbFile &file = nzb.files[f];
+        if (!file.want)
+            continue;
+        char path[320];
+        NntpFilePath(dir, f, path, sizeof(path));
+        if (IsPar2File(path))
+        {
+            par2Paths.push_back(path);
+            continue;
+        }
+        DownloadedFile d;
+        d.name = file.name;
+        d.path = path;
+        d.missing = file.missing;
+        dataMissing += file.missing;
+        files.push_back(d);
+    }
+
+    // --- par2: name, check, repair -------------------------------------------
+    if (!par2Paths.empty())
+    {
+        const Par2Outcome repaired = RepairWithPar2(job, config, &nzb, dir, par2Paths, &files, dataMissing, error,
+                                                    sizeof(error));
+        if (repaired != PAR2_OUTCOME_OK)
+        {
+            NzbFree(&nzb);
+            RemoveFolder(dir);
+            if (repaired == PAR2_OUTCOME_CANCELLED)
+                FinishLocked(job, QUEUE_OUTCOME_CANCELLED, "Stopped", "Nothing was installed.", false);
+            else
+                FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't repair the download", error, true);
+            return;
+        }
+    }
+    else if (dataMissing > 0)
+    {
+        NzbFree(&nzb);
+        RemoveFolder(dir);
+        _snprintf(error, sizeof(error), "%lu article(s) are missing, and the post has no par2 files to repair them.",
+                  dataMissing);
+        error[sizeof(error) - 1] = '\0';
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Download incomplete", error, true);
         return;
     }
 
@@ -1770,7 +2049,7 @@ static void RunUsenetJob(GameJob *job, const char *gamesPath)
     SetPhase(job, "Finding the disc image", 0, 0, 0);
     std::vector<FoundImage> images;
     std::string problem;
-    FindImages(nzb, dir, &images, &problem);
+    FindImages(files, &images, &problem);
     NzbFree(&nzb);
     if (images.empty())
     {

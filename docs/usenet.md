@@ -17,8 +17,11 @@ GameInstaller's worker: RunJob → RunUsenetJob
   2. FetchNzb()                 the release's downloadUrl: Prowlarr answers 301 to the indexer's link,
                                 and the NZB comes from the indexer, over HTTPS
   3. NzbParse()                 files, segments, message IDs
-  4. room check                 the download (par2 left out) and the game: twice the download
-  5. NntpDownload()             every non-par2 file into <drive>\Omni360Staging\U<job id>\F000, F001, …
+  4. room check                 the download (par2 volumes left out) and the game: twice the download
+  5. NntpDownload()             every file but the par2 volumes into <drive>\Omni360Staging\U<job id>\F000, F001, …
+                                - stopping early if more goes missing than the volumes could repair
+  5b. RepairWithPar2()          names files from the par2 index, checks those that lacked articles,
+                                fetches just enough volumes, repairs (Par2.cpp)
   6. FindImages()               bare .iso files, and disc images in stored RAR sets
   7. InstallImage() per image   GodInspect → room check → GodConvert, through a SpanSource
   8. the staging folder goes, whatever happened
@@ -67,7 +70,18 @@ Each thread takes the next article off a shared list — in file order, so the f
 
 A connection that can't reconnect after five tries puts its article back for another connection and stops. When every connection has stopped and articles are left, the provider was lost: the job fails with *Download failed*. A refused login (`481`/`482`) stops everything at once. A greeting other than `200`/`201` — usually `502`, over the plan's connection limit — costs only that connection; the others carry on.
 
-There's no par2: an article that's missing, or that fails its CRC, can't be repaired. It's counted, and if any were, the job ends with *Download incomplete* rather than installing an image with holes in it. `.par2` files aren't downloaded at all.
+An article that's missing - `430`, gone from the provider - or that fails its CRC is counted against its file (`NzbFile::missing`), with what the server answered logged. As NZBGet does, the download stops (*Too much is missing*) as soon as the bytes missing pass what the post's par2 volumes hold, since nothing could repair it then.
+
+## par2
+
+`Par2.cpp` implements Parchive 2.0: packets checked against their MD5 (`Md5Digest.cpp`), the main, file description and slice checksum packets of the index, and recovery slices - Reed-Solomon over GF(2^16) with the generator 0x1100B, each input slice's base 2^n for the n-th exponent coprime to 65535.
+
+1. The index (`name.par2`) is always downloaded. Every downloaded file is matched to it by name, or - posted under a made-up name - by the MD5 of its first 16KB, and takes par2's name, so obfuscated posts install too.
+2. Only the files that lacked articles are read, slice by slice, against the index's CRC32s; a file that never came is all damaged slices.
+3. Volumes (`name.volNN+MM.par2`, MM recovery slices each) are fetched smallest first until they hold the damaged count plus two, and again if some arrive damaged.
+4. The damaged slices are solved for: k equations from k recovery slices, the coefficient matrix inverted by Gauss-Jordan, then one pass over every intact slice and the recovery slices, each multiplied in and added to every slice being rebuilt (as many at a time as fit in 48MB). Each rebuilt slice is checked against its CRC before it's written.
+
+`tools/test_usenet` checks this against par2cmdline's own output (`make_par2_data.py`): a RAR set with a hole, a cut-off volume, a volume that never came and one under a random name is repaired byte for byte.
 
 Logins are sent only as `AUTHINFO USER`/`PASS`, and never logged.
 
@@ -96,8 +110,6 @@ The check before downloading wants twice the download's size — the files, and 
 
 ## Not done yet
 
-- par2 verification and repair.
 - Decompressing RAR (and 7z).
-- Obfuscated posts — random file names, made right only by par2.
 - Resuming a download across a restart: the staging folder is cleared when Omni360 starts.
 

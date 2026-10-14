@@ -115,7 +115,7 @@ Nothing downloads without you choosing it, and a popup says when each job finish
 ## Known limitations
 
 - **Downloads are slow-ish** — about 3.5MB/s on average, so a game takes half an hour or more. archive.org's servers are the limit, not the console. Usenet, where you have it, isn't held back by archive.org; the console's own TLS decryption is the limit there.
-- **Usenet has no par2 repair**, and installs only a bare `.iso` or one in *stored* RAR volumes — not compressed RARs, 7z, password-protected or obfuscated posts. A post missing articles fails and says so.
+- **Usenet installs only a bare `.iso` or one in *stored* RAR volumes** — not compressed RARs, 7z or password-protected posts. Missing articles are repaired with par2 when the post has enough recovery data; when it hasn't, the download stops early and says so.
 - **Some games aren't in the Store.** Games archived only as compressed RARs (in the `XBOX_360_*` items, such as the DiRT series and Deadpool) aren't listed, as the installer would have to unpack them first; uncompressed RARs, like BioShock Infinite's, install like any other game. A few dozen more aren't on archive.org at all.
 - **An interrupted game install starts over.** Pieces resume within a session, but quitting the app mid-download removes what was downloaded.
 - **A multi-disc game installed some other way** — from real discs, or another tool — can't be uninstalled by version from its Store page, since Omni360 can't tell which disc is which. Its own library entry still can be, if the Store hasn't got it.

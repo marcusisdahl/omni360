@@ -304,6 +304,11 @@ void StartNetwork()
     memset(&xnsp, 0, sizeof(xnsp));
     xnsp.cfgSizeOfStruct = sizeof(xnsp);
     xnsp.cfgFlags = XNET_STARTUP_BYPASS_SECURITY;
+    // XNet allows 32 TCP sockets at once by default, and a closed one counts
+    // until it's done lingering. A Usenet download alone can want 50, beside
+    // the art and the other downloads - and only this first startup's limits
+    // count; every later XNetStartup only adds to the reference count.
+    xnsp.cfgSockMaxStreamSockets = 100;
     if (XNetStartup(&xnsp) != 0)
     {
         dprintf("[net] the network stack wouldn't start\n");

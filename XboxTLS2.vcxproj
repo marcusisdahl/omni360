@@ -399,6 +399,8 @@
     <ClInclude Include="src\Nzb.h" />
     <ClInclude Include="src\Nntp.h" />
     <ClInclude Include="src\Yenc.h" />
+    <ClInclude Include="src\Md5Digest.h" />
+    <ClInclude Include="src\Par2.h" />
     <ClInclude Include="src\RarVolumes.h" />
     <ClInclude Include="src\parsing.h" />
     <ClInclude Include="src\settings.h" />
@@ -463,6 +465,8 @@
     <ClCompile Include="src\Nzb.cpp" />
     <ClCompile Include="src\Nntp.cpp" />
     <ClCompile Include="src\Yenc.cpp" />
+    <ClCompile Include="src\Md5Digest.cpp" />
+    <ClCompile Include="src\Par2.cpp" />
     <ClCompile Include="src\RarVolumes.cpp" />
     <ClCompile Include="src\parsing.cpp" />
     <ClCompile Include="src\StfsParser.cpp" />

@@ -181,6 +181,12 @@
     <ClCompile Include="src\Yenc.cpp">
       <Filter>Source Files\Installs</Filter>
     </ClCompile>
+    <ClCompile Include="src\Md5Digest.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Par2.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
     <ClCompile Include="src\RarVolumes.cpp">
       <Filter>Source Files\Installs</Filter>
     </ClCompile>
@@ -1231,6 +1237,12 @@
       <Filter>Source Files\Installs</Filter>
     </ClInclude>
     <ClInclude Include="src\Yenc.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Md5Digest.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Par2.h">
       <Filter>Source Files\Installs</Filter>
     </ClInclude>
     <ClInclude Include="src\RarVolumes.h">

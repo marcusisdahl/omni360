@@ -16,9 +16,10 @@ struct Nzb;
 // the connections are spread over its cores; plain NNTP (port 119) skips
 // that, where a provider still offers it.
 //
-// Unlike NZBGet there's no par2 repair: an article the provider no longer
-// has, or one that fails its CRC, can't be made good, and the download says
-// how many there were. .par2 files aren't downloaded at all.
+// An article the provider no longer has - 430, taken down or past its
+// retention - or one that fails its CRC is counted against its file, for
+// par2 (Par2.h) to repair afterwards. As NZBGet does, the download stops as
+// soon as more is missing than the post's par2 volumes could ever repair.
 //
 // Files go into a folder as F000, F001, ... - FATX names are short, and the
 // posts' are long - in the NZB's order; a file's real name stays in the Nzb.
@@ -38,7 +39,9 @@ struct NntpServer
 enum NntpResult
 {
     NNTP_OK,
-    NNTP_INCOMPLETE,       // articles were missing or damaged - *outMissing says how many
+    NNTP_INCOMPLETE,       // articles were missing or damaged - *outMissing says how many, and each
+                           // file's NzbFile::missing which; par2 may make it good
+    NNTP_TOO_DAMAGED,      // more is missing than the par2 volumes could repair, so it stopped
     NNTP_AUTH_FAILED,      // the provider refused the user name or password
     NNTP_CONNECT_FAILED,   // no connection could be made at all
     NNTP_WRITE_FAILED,     // the drive refused a write
@@ -57,11 +60,14 @@ struct NntpProgress
 // runs. False stops it.
 typedef bool (*NntpProgressFn)(const NntpProgress &progress, void *context);
 
-// Downloads every file of nzb but its .par2 ones into dir, which must
-// exist. A file whose name the NZB didn't give gets the one its yEnc header
-// does. Blocks until done; error says what went wrong, fit for the screen.
-NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, NntpProgressFn progressFn,
-                        void *context, unsigned long *outMissing, char *error, size_t errorSize);
+// Downloads the files of nzb marked `want` into dir, which must exist. A file
+// whose name the NZB didn't give gets the one its yEnc header does. With
+// stopWhenUnrepairable, it stops once more is missing than the par2 volumes
+// it isn't downloading could repair (NNTP_TOO_DAMAGED). Blocks until done;
+// error says what went wrong, fit for the screen.
+NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, bool stopWhenUnrepairable,
+                        NntpProgressFn progressFn, void *context, unsigned long *outMissing, char *error,
+                        size_t errorSize);
 
 // One connection, logged in and closed again, for Settings' Test. True if it
 // worked; message says how it went either way, fit for the screen.

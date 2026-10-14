@@ -9,6 +9,7 @@ DESCRIPTION : Downloading an NZB's articles over several NNTP connections.
 #include "Debug.h" // GUARDED_THREAD, LogCrash
 #include "Nzb.h"
 #include "Yenc.h"
+#include "Par2.h" // Par2VolumeBlocks, for how much could be repaired
 #include "XboxTLS.h"
 #include "dns.h"
 #include "OutputConsole.h"
@@ -255,13 +256,29 @@ struct Shared
     unsigned long *left;              // each file's segments not yet done
     unsigned long long done;
     unsigned long long total;
-    unsigned long missing;
+    unsigned long missing;            // gone + failed + damaged
+    unsigned long gone;               // 430/423: the provider hasn't got it - removed, or past its retention
+    unsigned long failed;             // asked for three times and never had whole
+    unsigned long damaged;            // had, but its CRC didn't match
+    unsigned long long missingBytes;
+    unsigned long long recoveryBytes; // the post's par2 volumes: about as much as could be repaired
+    bool checkHealth;
+    bool tooDamaged;
     int connected;
     int everConnected;
     bool stop;
     bool authFailed;
     bool writeFailed;
     char why[160];                    // the last connection failure
+    char lastReply[96];               // the last answer to BODY that wasn't 222 or 430
+};
+
+enum ArticleOutcome
+{
+    ARTICLE_GOOD,
+    ARTICLE_GONE,
+    ARTICLE_FAILED,
+    ARTICLE_DAMAGED
 };
 
 struct ThreadArgs
@@ -333,16 +350,39 @@ static bool WritePart(Shared *s, int fileIndex, const YencPart &part, const unsi
     return ok;
 }
 
-static void FinishSegment(Shared *s, unsigned long index, bool good)
+static void FinishSegment(Shared *s, unsigned long index, ArticleOutcome outcome)
 {
     const int file = s->segmentFile[index];
     bool closeIt = false;
+    bool justGaveUp = false;
     EnterCriticalSection(&s->lock);
     s->done += s->nzb->segments[index].bytes;
-    if (!good)
+    if (outcome != ARTICLE_GOOD)
+    {
         s->missing++;
+        s->nzb->files[file].missing++;
+        s->missingBytes += s->nzb->segments[index].bytes;
+        if (outcome == ARTICLE_GONE)
+            s->gone++;
+        else if (outcome == ARTICLE_FAILED)
+            s->failed++;
+        else
+            s->damaged++;
+
+        // NZBGet's "health": once more is missing than the par2 volumes could
+        // rebuild, the rest would be downloaded for nothing.
+        if (s->checkHealth && !s->tooDamaged && s->missingBytes > s->recoveryBytes)
+        {
+            s->tooDamaged = true;
+            s->stop = true;
+            justGaveUp = true;
+        }
+    }
     closeIt = (--s->left[file] == 0);
     LeaveCriticalSection(&s->lock);
+    if (justGaveUp)
+        dprintf("[nntp] stopping: %I64u KB missing, and the par2 volumes hold about %I64u KB\n",
+                s->missingBytes / 1024, s->recoveryBytes / 1024);
 
     if (closeIt)
     {
@@ -436,6 +476,17 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                 if (code != 222)
                 {
                     // Cut off, or a 4xx/5xx that means the connection's done.
+                    // What the server said is kept, for the log and the
+                    // message - "not on the server" can't tell these apart.
+                    if (code > 0)
+                    {
+                        EnterCriticalSection(&s->lock);
+                        _snprintf(s->lastReply, sizeof(s->lastReply), "%s", line);
+                        s->lastReply[sizeof(s->lastReply) - 1] = '\0';
+                        LeaveCriticalSection(&s->lock);
+                    }
+                    if (attempt == 0)
+                        dprintf("[nntp] connection %d: BODY answered %d\n", slot + 1, code);
                     Close(c);
                     continue;
                 }
@@ -492,7 +543,7 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                 break;
             }
 
-            bool good = false;
+            ArticleOutcome outcome = gone ? ARTICLE_GONE : ARTICLE_FAILED;
             if (got)
             {
                 YencPart part;
@@ -519,16 +570,21 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                         s->stop = true;
                         LeaveCriticalSection(&s->lock);
                     }
-                    good = (r == YENC_OK);
+                    outcome = (r == YENC_OK) ? ARTICLE_GOOD : ARTICLE_DAMAGED;
                 }
-                if (!good)
+                else
+                    outcome = ARTICLE_DAMAGED;
+                if (outcome != ARTICLE_GOOD)
                     dprintf("[nntp] article %lu of file %d: %s\n", segment.number, s->segmentFile[index] + 1,
-                            r == YENC_CRC_MISMATCH ? "damaged (CRC)" : r == YENC_TOO_BIG ? "too big" : "not yEnc");
+                            r == YENC_CRC_MISMATCH ? "damaged (CRC)"
+                            : r == YENC_TOO_BIG    ? "too big"
+                            : r == YENC_TRUNCATED  ? "cut short"
+                                                   : "not yEnc");
             }
             else
-                dprintf("[nntp] article %lu of file %d: not on the server\n", segment.number,
-                        s->segmentFile[index] + 1);
-            FinishSegment(s, index, good);
+                dprintf("[nntp] article %lu of file %d: %s\n", segment.number, s->segmentFile[index] + 1,
+                        gone ? "gone from the server (430)" : "couldn't be had");
+            FinishSegment(s, index, outcome);
             articles++;
         }
 
@@ -608,8 +664,9 @@ static void SetError(char *error, size_t errorSize, const char *format, ...)
 
 GUARDED_THREAD("usenet connection", ConnectionEntry)
 
-NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, NntpProgressFn progressFn,
-                        void *context, unsigned long *outMissing, char *error, size_t errorSize)
+NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, bool stopWhenUnrepairable,
+                        NntpProgressFn progressFn, void *context, unsigned long *outMissing, char *error,
+                        size_t errorSize)
 {
     *outMissing = 0;
     SetError(error, errorSize, "");
@@ -622,25 +679,37 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, Nnt
     s->done = 0;
     s->total = 0;
     s->missing = 0;
+    s->gone = 0;
+    s->failed = 0;
+    s->damaged = 0;
+    s->missingBytes = 0;
+    s->recoveryBytes = 0;
+    s->checkHealth = stopWhenUnrepairable;
+    s->tooDamaged = false;
     s->connected = 0;
     s->everConnected = 0;
     s->stop = false;
     s->authFailed = false;
     s->writeFailed = false;
     s->why[0] = '\0';
+    s->lastReply[0] = '\0';
     s->files = (FILE **)calloc(nzb->fileCount, sizeof(FILE *));
     s->left = (unsigned long *)calloc(nzb->fileCount, sizeof(unsigned long));
     s->segmentFile.assign(nzb->segmentCount, -1);
     for (int f = 0; f < nzb->fileCount; ++f)
     {
-        const NzbFile &file = nzb->files[f];
+        NzbFile &file = nzb->files[f];
+        if (file.par2 && !file.want && Par2VolumeBlocks(file.name) > 0)
+            s->recoveryBytes += file.bytes;
+        if (file.want)
+            file.missing = 0;
         for (unsigned long i = 0; i < file.segmentCount; ++i)
         {
             s->segmentFile[file.firstSegment + i] = f;
-            if (!file.par2)
+            if (file.want)
                 s->work.push_back(file.firstSegment + i);
         }
-        if (!file.par2)
+        if (file.want)
         {
             s->left[f] = file.segmentCount;
             s->total += file.bytes;
@@ -730,13 +799,29 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, Nnt
 
     const bool unfinished = !s->again.empty() || s->next < s->work.size();
     const DWORD seconds = (GetTickCount() - begun) / 1000;
-    dprintf("[nntp] %I64u MB in %lu:%02lu (%.2f MB/s), %lu article(s) missing%s\n", s->done / (1024 * 1024),
-            (unsigned long)(seconds / 60), (unsigned long)(seconds % 60),
-            seconds > 0 ? s->done / 1048576.0 / seconds : 0.0, s->missing, unfinished ? ", unfinished" : "");
+    dprintf("[nntp] %I64u MB in %lu:%02lu (%.2f MB/s), %lu article(s) missing - %lu gone (430), %lu failed, "
+            "%lu damaged%s\n",
+            s->done / (1024 * 1024), (unsigned long)(seconds / 60), (unsigned long)(seconds % 60),
+            seconds > 0 ? s->done / 1048576.0 / seconds : 0.0, s->missing, s->gone, s->failed, s->damaged,
+            unfinished ? ", unfinished" : "");
+    if (s->lastReply[0] != '\0')
+        dprintf("[nntp] the last answer that wasn't an article: %s\n", s->lastReply);
 
     NntpResult result = NNTP_OK;
     if (cancelled)
         result = NNTP_CANCELLED;
+    else if (s->tooDamaged)
+    {
+        result = NNTP_TOO_DAMAGED;
+        if (s->gone >= s->failed + s->damaged)
+            SetError(error, errorSize,
+                     "Too much of it is gone from %s - taken down, or past its retention - for par2 to repair. "
+                     "Try another release.",
+                     server.host);
+        else
+            SetError(error, errorSize, "Too many articles failed (%s) for par2 to repair.",
+                     s->lastReply[0] != '\0' ? s->lastReply : "no answer");
+    }
     else if (s->authFailed)
     {
         result = NNTP_AUTH_FAILED;
@@ -758,8 +843,8 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, Nnt
     else if (s->missing > 0)
     {
         result = NNTP_INCOMPLETE;
-        SetError(error, errorSize, "%lu article(s) were missing or damaged, and there's no par2 repair.",
-                 s->missing);
+        SetError(error, errorSize, "%lu article(s) missing: %lu gone from the server, %lu failed, %lu damaged.",
+                 s->missing, s->gone, s->failed, s->damaged);
     }
     *outMissing = s->missing;
 

@@ -131,6 +131,8 @@ bool NzbParse(const char *xml, Nzb *out)
         if (Attribute(file, fileTagEnd, "subject", &subject))
             NzbNameFromSubject(subject.c_str(), f.name, sizeof(f.name));
         f.par2 = EndsWithNoCase(f.name, ".par2");
+        f.want = !f.par2;
+        f.missing = 0;
         f.firstSegment = (unsigned long)segments.size();
 
         const char *s = fileTagEnd;

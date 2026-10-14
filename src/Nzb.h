@@ -34,7 +34,9 @@ struct NzbFile
     unsigned long firstSegment; // its segments, in order, at Nzb::segments + firstSegment
     unsigned long segmentCount;
     unsigned long long bytes;   // the segments' bytes, added up
-    bool par2;                  // a .par2 file - repair data, not downloaded
+    bool par2;                  // a .par2 file - repair data
+    bool want;                  // to download - everything but .par2 files, to start with
+    unsigned long missing;      // articles that couldn't be had, once downloaded
 };
 
 struct Nzb

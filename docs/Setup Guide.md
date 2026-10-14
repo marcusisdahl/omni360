@@ -124,11 +124,11 @@ What it can install:
 - **A bare `.iso`** in the post.
 - **A disc image in RAR volumes**, if they're *stored* — packed with no compression (`-m0`), as console images usually are. The image is read straight out of the volumes, so it's never unpacked: no second copy on the drive. Old-style (`.rar`, `.r00`, `.r01` …) and new-style (`.part01.rar` …) names both work.
 
+Missing articles are repaired with the post's **par2** files, as NZBGet does: the small index is always downloaded, the files that lacked articles are checked against it, only as many recovery volumes as the damage needs are fetched, and the files are repaired before installing. par2 also names files posted under random (obfuscated) names. If more is missing than the par2 files could ever repair, the download stops early and says so.
+
 What it can't, yet:
 
-- **par2 repair.** `.par2` files aren't downloaded. If the provider is missing an article, or one arrives damaged, the job says how many and stops — try another release.
 - **Compressed RARs, 7z, and passwords.**
-- **Obfuscated posts**, whose file names are random until par2 renames them.
 
 Room needed is the download and the game, as with archive.org: about twice the release's size while it installs. The download is removed afterwards.
 
@@ -148,7 +148,8 @@ Room needed is the download and the game, as with archive.org: about twice the r
 - **"Couldn't get the NZB"** — Prowlarr redirects the download to the indexer, so either Prowlarr or the indexer couldn't be reached. "Download limit has been reached" is the indexer's daily grab limit; "disabled" means Prowlarr has paused the indexer after failures. A secure-connection failure in the log for the indexer's host means its certificate chains to a root Omni360 doesn't carry — open an issue naming the indexer.
 - **"Usenet login refused"** — check `usenet-user:` and `usenet-pass:`. "Turned the connection away" with a 502 in the log is usually your plan's connection limit: lower `usenet-connections:`.
 - **"Couldn't make a secure connection"** to your Usenet provider — its certificate chains to a root Omni360 doesn't carry (`tools/make_trust_anchors.py` lists them). Try `usenet-ssl: off` if your provider offers plain NNTP, or open an issue naming the provider.
-- **"Download incomplete"** — articles were missing or damaged, and there's no par2 repair on the console. Pick another release of the same game.
+- **"Too much is missing"** — more of the post is gone from your provider than its par2 files could repair, so the download stopped early rather than fetch the rest for nothing. Usually an old release that's been taken down or is past your provider's retention: pick a newer or more-grabbed one. The log's `[nntp]` lines say how many articles were gone (430) and what the server answered.
+- **"Couldn't repair the download"** — there weren't enough intact par2 recovery blocks, or the post had none.
 - **"No disc image to install"** — the line under it says what was found instead: a compressed RAR, a password, or names that look obfuscated.
 - **Garbled game names** — STFS display-name encoding. `StfsParser.cpp` detects UTF-8 versus UTF-16BE per file and re-encodes both to UTF-8. If a name still looks wrong, that is worth reporting rather than expected.
 
