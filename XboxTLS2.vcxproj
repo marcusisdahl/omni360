@@ -393,6 +393,11 @@
     <ClInclude Include="src\stb_image.h" />
     <ClInclude Include="src\TitleNames.h" />
     <ClInclude Include="src\RarHeaders.h" />
+    <ClInclude Include="src\Usenet.h" />
+    <ClInclude Include="src\Nzb.h" />
+    <ClInclude Include="src\Nntp.h" />
+    <ClInclude Include="src\Yenc.h" />
+    <ClInclude Include="src\RarVolumes.h" />
     <ClInclude Include="src\parsing.h" />
     <ClInclude Include="src\settings.h" />
     <ClInclude Include="src\StfsParser.h" />
@@ -452,6 +457,11 @@
     <ClCompile Include="src\CoverArt.cpp" />
     <ClCompile Include="src\ImageDecode.cpp" />
     <ClCompile Include="src\RarHeaders.cpp" />
+    <ClCompile Include="src\Usenet.cpp" />
+    <ClCompile Include="src\Nzb.cpp" />
+    <ClCompile Include="src\Nntp.cpp" />
+    <ClCompile Include="src\Yenc.cpp" />
+    <ClCompile Include="src\RarVolumes.cpp" />
     <ClCompile Include="src\parsing.cpp" />
     <ClCompile Include="src\StfsParser.cpp" />
     <ClCompile Include="src\FolderGames.cpp" />

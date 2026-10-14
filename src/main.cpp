@@ -952,7 +952,8 @@ enum PickerKind
 {
     PICKER_NONE,
     PICKER_DLC,
-    PICKER_TITLE_UPDATE
+    PICKER_TITLE_UPDATE,
+    PICKER_USENET        // Prowlarr's releases for what was typed, from the Store's Usenet button
 };
 
 // The picker opens the moment A or X is pressed, while the search runs on the
@@ -965,7 +966,8 @@ enum PickerStatus
     PICKER_UNREACHABLE  // archive.org couldn't be reached - A tries again
 };
 
-#define MAX_PICKER_ROWS (MAX_DLC_RAR_MATCHES > MAX_TITLE_UPDATE_MATCHES ? MAX_DLC_RAR_MATCHES : MAX_TITLE_UPDATE_MATCHES)
+#define MAX_PICKER_MATCHES (MAX_DLC_RAR_MATCHES > MAX_TITLE_UPDATE_MATCHES ? MAX_DLC_RAR_MATCHES : MAX_TITLE_UPDATE_MATCHES)
+#define MAX_PICKER_ROWS (MAX_PICKER_MATCHES > MAX_USENET_RESULTS ? MAX_PICKER_MATCHES : MAX_USENET_RESULTS)
 
 struct Picker
 {
@@ -975,7 +977,7 @@ struct Picker
     ShellPage page; // the page it's open over: the library, or a game in the Store
 
     // The game it's for - copied, since it may be the disc in the drive,
-    // which isn't in the library.
+    // which isn't in the library. For PICKER_USENET, what was typed.
     char gameName[256];
     unsigned long titleId;
     int count;
@@ -984,6 +986,8 @@ struct Picker
 
     DlcRarMatch packs[MAX_DLC_RAR_MATCHES];
     TitleUpdateMatch updates[MAX_TITLE_UPDATE_MATCHES];
+    UsenetRelease releases[MAX_USENET_RESULTS];
+    char error[160]; // PICKER_UNREACHABLE for PICKER_USENET: what Prowlarr's problem was
 
     // What the list page draws. labels point into packs/updates.
     const char *labels[MAX_PICKER_ROWS];
@@ -1006,7 +1010,11 @@ static void OpenPicker(Picker &picker, PickerKind kind, const char *gameName, un
     picker.count = 0;
     picker.selected = 0;
     picker.scroll = -1;
-    picker.requestId = BeginSearch(kind == PICKER_DLC ? SEARCH_DLC : SEARCH_TITLE_UPDATES, picker.gameName);
+    picker.error[0] = '\0';
+    picker.requestId = BeginSearch(kind == PICKER_DLC      ? SEARCH_DLC
+                                   : kind == PICKER_USENET ? SEARCH_USENET
+                                                           : SEARCH_TITLE_UPDATES,
+                                   picker.gameName);
 
     // 0 means the search worker never started; the log says why.
     picker.status = (picker.requestId != 0) ? PICKER_SEARCHING : PICKER_UNREACHABLE;
@@ -1057,6 +1065,38 @@ static void FillTitleUpdateRows(Picker &picker)
     }
 }
 
+// The rows for a Usenet search: the release's title, then what there is to
+// judge it by - its size, the indexer, when it was posted, how many have
+// grabbed it.
+static void AppendText(char *out, size_t outSize, const char *separator, const char *text); // with the Store's
+
+static void FillUsenetRows(Picker &picker)
+{
+    for (int i = 0; i < picker.count; ++i)
+    {
+        const UsenetRelease &release = picker.releases[i];
+        picker.labels[i] = release.title;
+
+        char *sub = picker.subText[i];
+        const size_t subSize = sizeof(picker.subText[i]);
+        sub[0] = '\0';
+        if (release.size > 0)
+            FormatBytes(release.size, sub, subSize);
+        if (release.indexer[0] != '\0')
+            AppendText(sub, subSize, "   ", release.indexer);
+        if (release.posted[0] != '\0')
+            AppendText(sub, subSize, "   ", release.posted);
+        if (release.grabs >= 0)
+        {
+            char grabs[32];
+            _snprintf(grabs, sizeof(grabs), "%d grab%s", release.grabs, release.grabs == 1 ? "" : "s");
+            grabs[sizeof(grabs) - 1] = '\0';
+            AppendText(sub, subSize, "   ", grabs);
+        }
+        picker.sublabels[i] = sub;
+    }
+}
+
 // Collects the picker's search result, if it has arrived. Called every frame
 // while the picker is searching.
 static void PollPickerSearch(Picker &picker)
@@ -1071,6 +1111,8 @@ static void PollPickerSearch(Picker &picker)
 
     if (result.count < 0)
     {
+        _snprintf(picker.error, sizeof(picker.error), "%s", result.error);
+        picker.error[sizeof(picker.error) - 1] = '\0';
         picker.status = PICKER_UNREACHABLE;
         return;
     }
@@ -1087,6 +1129,11 @@ static void PollPickerSearch(Picker &picker)
     {
         memcpy(picker.packs, result.packs, sizeof(picker.packs));
         FillDlcRows(picker);
+    }
+    else if (picker.kind == PICKER_USENET)
+    {
+        memcpy(picker.releases, result.releases, sizeof(picker.releases));
+        FillUsenetRows(picker);
     }
     else
     {
@@ -2185,6 +2232,7 @@ static const StoreButtonView kStoreButtons[STORE_BUTTON_COUNT] = {
     { "XBLA", false },
     { "XBLIG", false },
     { "Original Xbox", false },
+    { "Usenet", false },
 };
 
 // What each will be, for the toast when one's pressed before then.
@@ -2192,11 +2240,13 @@ static const StoreButtonView kStoreButtons[STORE_BUTTON_COUNT] = {
 #define STORE_BUTTON_XBLA  1
 #define STORE_BUTTON_XBLIG 2
 #define STORE_BUTTON_XBOX  3
+#define STORE_BUTTON_USENET 4
 static const char *const kStoreButtonsSoon[STORE_BUTTON_COUNT] = {
     "Search every game by name",
     "Xbox Live Arcade games, A to Z",
     "Xbox Live Indie Games, A to Z",
     "Original Xbox games, A to Z",
+    "Search Usenet through Prowlarr",
 };
 
 static const char kStoreLetters[] = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -2569,6 +2619,64 @@ static bool OpenStoreSearch(Shell &shell)
     shell.storeLetterScroll = 0;
     shell.storeInLetter = true;
     return true;
+}
+
+// The Usenet button: the keyboard, then Prowlarr's releases for what was
+// typed, in the picker. Settings missing from settings.txt are said first,
+// rather than after a search. True if the keyboard was shown.
+static bool OpenUsenetSearch(Shell &shell)
+{
+    static UsenetConfig config;
+    const UsenetSetup setup = LoadUsenetConfig(&config);
+    if (setup != USENET_READY)
+    {
+        const char *heading = "", *detail = "";
+        UsenetSetupText(setup, &heading, &detail);
+        ShowShellToast(heading, detail, UI_TOAST_ERROR);
+        return false;
+    }
+
+    static char lastQuery[64] = "";
+    WCHAR typedBefore[64];
+    NarrowToWide(lastQuery, typedBefore, 64);
+    std::string typed;
+    if (OpenKeyboardToString(XUSER_INDEX_ANY, &typed, L"Search Usenet",
+                             L"Searched through Prowlarr - pick a release to download and install", typedBefore) !=
+        ERROR_SUCCESS)
+        return true; // cancelled
+    TrimInPlace(typed);
+    if (typed.empty())
+        return true;
+    _snprintf(lastQuery, sizeof(lastQuery), "%s", typed.c_str());
+    lastQuery[sizeof(lastQuery) - 1] = '\0';
+
+    OpenPicker(shell.picker, PICKER_USENET, typed.c_str(), 0, SHELL_PAGE_STORE);
+    return true;
+}
+
+// A release chosen in the Usenet picker, into the game installer's queue.
+static void QueueUsenetRelease(const UsenetRelease &release)
+{
+    GameRequest request;
+    memset(&request, 0, sizeof(request));
+    request.usenet = true;
+    _snprintf(request.item, sizeof(request.item), "usenet");
+    _snprintf(request.zipName, sizeof(request.zipName), "%s", release.title);
+    request.zipName[sizeof(request.zipName) - 1] = '\0';
+    UsenetDisplayName(release.title, request.name, sizeof(request.name));
+    _snprintf(request.nzbUrl, sizeof(request.nzbUrl), "%s", release.nzbUrl);
+    request.nzbUrl[sizeof(request.nzbUrl) - 1] = '\0';
+    request.zipSize = release.size;
+
+    const GameEnqueueResult result = EnqueueGameInstall(request, "");
+    if (result == GAME_QUEUED)
+        ShowShellToast("Added to the queue", request.name, UI_TOAST_INFO);
+    else if (result == GAME_ALREADY_QUEUED)
+        ShowShellToast("Already in the queue", request.name, UI_TOAST_INFO);
+    else if (result == GAME_QUEUE_FULL)
+        ShowShellToast("The queue is full", "Wait for an install to finish first.", UI_TOAST_ERROR);
+    else
+        ShowShellToast("Couldn't add it", "The game installer isn't running.", UI_TOAST_ERROR);
 }
 
 static StoreLetterView MakeStoreLetterView(const Shell &shell)
@@ -3524,6 +3632,8 @@ static bool ActOnStoreFocus(Shell &shell)
             OpenSection(shell, SECTION_XBOX);
         else if (i - STORE_FOCUS_BUTTONS == STORE_BUTTON_SEARCH)
             return OpenStoreSearch(shell);
+        else if (i - STORE_FOCUS_BUTTONS == STORE_BUTTON_USENET)
+            return OpenUsenetSearch(shell);
         else
             ShowShellToast("Coming soon", kStoreButtonsSoon[i - STORE_FOCUS_BUTTONS], UI_TOAST_INFO);
     }
@@ -4138,12 +4248,40 @@ static void RenderGamePageFrame(Shell &shell, const Library &lib, UiHint *hints,
     shell.storeVersionScroll = view.versionScroll;
 }
 
+static const char *PickerHeading(PickerKind kind)
+{
+    return kind == PICKER_DLC ? "Choose a DLC pack" : kind == PICKER_USENET ? "Choose a release" : "Choose a title update";
+}
+
 static void RenderPickerFrame(Shell &shell, UiHint *hints, int hintCount)
 {
-    if (shell.picker.kind != PICKER_NONE && shell.picker.status != PICKER_READY)
+    if (shell.picker.kind == PICKER_USENET && shell.picker.status != PICKER_READY)
+    {
+        // The same screens as the archive.org pickers', in Prowlarr's terms.
+        const Picker &picker = shell.picker;
+        if (picker.status == PICKER_UNREACHABLE)
+            hintCount = AddHint(hints, hintCount, UI_BUTTON_A, L"Try again");
+        hintCount = AddHint(hints, hintCount, UI_BUTTON_B, L"Back");
+
+        if (picker.status == PICKER_SEARCHING)
+        {
+            static const char *const kSearching[] = {
+                "Searching Prowlarr", "Searching Prowlarr.", "Searching Prowlarr..", "Searching Prowlarr..."};
+            RenderPlaceholderFrame("Choose a release", kSearching[(GetTickCount() / 333) % 4], picker.gameName, hints,
+                                   hintCount);
+        }
+        else if (picker.status == PICKER_NOTHING)
+            RenderPlaceholderFrame("Choose a release", "No Usenet releases matched.", picker.gameName, hints,
+                                   hintCount);
+        else
+            RenderPlaceholderFrame("Choose a release", "Could not search Prowlarr.",
+                                   picker.error[0] != '\0' ? picker.error : "Check prowlarr-url: in settings.txt.",
+                                   hints, hintCount);
+    }
+    else if (shell.picker.kind != PICKER_NONE && shell.picker.status != PICKER_READY)
     {
         const Picker &picker = shell.picker;
-        const char *heading = (picker.kind == PICKER_DLC) ? "Choose a DLC pack" : "Choose a title update";
+        const char *heading = PickerHeading(picker.kind);
         const char *gameName = picker.gameName;
 
         if (picker.status == PICKER_UNREACHABLE)
@@ -4176,11 +4314,12 @@ static void RenderPickerFrame(Shell &shell, UiHint *hints, int hintCount)
     }
     else
     {
-        hintCount = AddHint(hints, hintCount, UI_BUTTON_A, L"Add to queue", L"Queue");
+        hintCount = AddHint(hints, hintCount, UI_BUTTON_A,
+                            shell.picker.kind == PICKER_USENET ? L"Download and install" : L"Add to queue", L"Queue");
         hintCount = AddHint(hints, hintCount, UI_BUTTON_B, L"Back");
 
         ListPageView view;
-        view.heading = (shell.picker.kind == PICKER_DLC) ? "Choose a DLC pack" : "Choose a title update";
+        view.heading = PickerHeading(shell.picker.kind);
         view.subheading = shell.picker.gameName;
         view.labels = shell.picker.labels;
         view.sublabels = shell.picker.sublabels;
@@ -4610,6 +4749,12 @@ int main()
             else if ((pressed & XINPUT_GAMEPAD_A) && picker.status == PICKER_UNREACHABLE)
             {
                 OpenPicker(picker, picker.kind, picker.gameName, picker.titleId, picker.page); // try again
+            }
+            else if ((pressed & XINPUT_GAMEPAD_A) && picker.status == PICKER_READY && picker.kind == PICKER_USENET)
+            {
+                // No archive.org keys for this - the provider's are in
+                // settings.txt, read when the job starts.
+                QueueUsenetRelease(picker.releases[picker.selected]);
             }
             else if ((pressed & XINPUT_GAMEPAD_A) && picker.status == PICKER_READY)
             {

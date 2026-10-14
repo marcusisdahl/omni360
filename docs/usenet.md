@@ -1,0 +1,86 @@
+# Usenet
+
+The Store's **Usenet** button is a second way to get a disc image onto the console, beside archive.org. Prowlarr is searched for what the user types, the release they pick is fetched as an NZB through it, and the console downloads the post itself from their Usenet provider: an NZBGet-style downloader, built in. Then the disc image in it is installed as Games on Demand by the same code an archive.org game goes through.
+
+Setting it up is in the [Setup Guide](Setup%20Guide.md#7-optional-usenet). This is how it works.
+
+## The flow
+
+```text
+Store → Usenet → keyboard
+  → SearchWorker (SEARCH_USENET)
+       UsenetSearch()          GET {prowlarr-url}/api/v1/search?query=…&type=search   X-Api-Key
+  → the picker (PICKER_USENET): title, size, indexer, date, grabs
+  → A: QueueUsenetRelease() → EnqueueGameInstall(GameRequest{ usenet = true, nzbUrl })
+GameInstaller's worker: RunJob → RunUsenetJob
+  1. LoadUsenetConfig()         settings.txt, read when the job starts
+  2. FetchNzb()                 the release's downloadUrl, through Prowlarr
+  3. NzbParse()                 files, segments, message IDs
+  4. room check                 the download (par2 left out) and the game: twice the download
+  5. NntpDownload()             every non-par2 file into <drive>\Omni360Staging\U<job id>\F000, F001, …
+  6. FindImages()               bare .iso files, and disc images in stored RAR sets
+  7. InstallImage() per image   GodInspect → room check → GodConvert, through a SpanSource
+  8. the staging folder goes, whatever happened
+```
+
+The job is a game job like any other: one at a time on the installer's worker, listed on the Queue page, stopped by **X**, reported by a popup.
+
+## Modules
+
+| File | What it does | Xbox-free? |
+|---|---|---|
+| `Usenet.cpp` / `.h` | The `settings.txt` keys, the Prowlarr search, fetching the NZB, the display name from a release title | No (HTTP) |
+| `Nzb.cpp` / `.h` | Reads an NZB: each `<file>`'s name (the quoted part of its subject), its segments in order with duplicates dropped, their message IDs, and whether it's a `.par2` | Yes |
+| `Yenc.cpp` / `.h` | Decodes one article body: `=ybegin`, `=ypart`, `=yend`, escapes, and checks `pcrc32` | Yes |
+| `Nntp.cpp` / `.h` | The downloader: connections, `AUTHINFO`, `BODY <id>`, dot-unstuffing, writing each part where it goes | No (sockets, TLS) |
+| `RarVolumes.cpp` / `.h` | Orders a RAR set by its names, walks each volume's headers, and reads a stored file's slices across the volumes as one image (`SpanSource`) | Yes |
+
+The Xbox-free ones are tested on a PC by `tools/test_usenet` (`python make_test_data.py`, then `build_and_run.bat`): yEnc round trips, a CRC that catches a changed byte, an NZB with segments out of order and listed twice, and a 10MB image read out of hand-made RAR4 volume sets with both naming schemes, including reads that cross volumes and a volume missing from the middle.
+
+## The downloader
+
+`NntpDownload` starts `usenet-connections` threads (8 by default, 16 at most), each with a connection of its own, spread over hardware threads 1, 4, 5 and 2 — away from the UI's thread 0, and from thread 3, the installer's, which only waits while this runs. TLS decryption is most of a connection's work on the 360, as it is for archive.org downloads.
+
+Each thread takes the next article off a shared list — in file order, so the files fill roughly front to back — and:
+
+1. sends `BODY <message-id>`;
+2. on `222`, reads lines up to the lone `.`, undoing dot-stuffing (`..` at a line's start back to `.`);
+3. decodes the yEnc, and writes the part at its offset in `F<nnn>`, under one write lock;
+4. on `430`/`423` (no such article), counts it missing; on anything else — a dropped connection, a `4xx`/`5xx` — reconnects and tries again, up to three times.
+
+A connection that can't reconnect after five tries puts its article back for another connection and stops. When every connection has stopped and articles are left, the provider was lost: the job fails with *Download failed*. A refused login (`481`/`482`) stops everything at once. A greeting other than `200`/`201` — usually `502`, over the plan's connection limit — costs only that connection; the others carry on.
+
+There's no par2: an article that's missing, or that fails its CRC, can't be repaired. It's counted, and if any were, the job ends with *Download incomplete* rather than installing an image with holes in it. `.par2` files aren't downloaded at all.
+
+Logins are sent only as `AUTHINFO USER`/`PASS`, and never logged.
+
+### TLS
+
+`usenet-ssl` is on by default, port 563. Connections use the same `XboxTLS` client and the same compiled-in roots as HTTPS (`addTrustAnchors`), so a provider whose certificate chains to a root not in `tools/trust-anchors/` fails with *Couldn't make a secure connection*. Google Trust Services, DigiCert G2, USERTrust RSA and Sectigo R46 were added for providers; ISRG (Let's Encrypt) was already there. With `usenet-ssl: off` the connection is plain TCP on port 119, which spares the CPU but sends the login in the clear.
+
+## Finding the image
+
+`FindImages` looks at each downloaded file by its name — from the NZB's subject, or the yEnc header when the subject had none:
+
+- **RAR volumes** (`RarVolumeName`): `game.part01.rar` is set `game`, place 1; `game.rar` is place −1, then `game.r00` … `game.r99` are 0–99 and `game.s00` … 100 on. Each set's volumes are sorted by place and walked in order (`RarWalkVolumes`). Every file header for the same name continues the same file, and contributes a slice: its data, from the end of the header for `PACK_SIZE` bytes. A stored file's slices add up to its size, or a volume is missing.
+- **A bare image** (`IsUsenetDiscImage`): `.iso`, or anything over a gigabyte that isn't an archive, par2 or video.
+
+An entry in a RAR set is taken if it looks like a disc image, and is stored (`-m0`), not encrypted, and complete. A compressed one is refused with a message that says so — decompressing RAR on the console isn't implemented. Images are installed in name order, so a two-disc post installs Disc 1 then Disc 2.
+
+`SpanSource` serves `GodConvert` reads from the slices: a binary search for the slice an offset falls in, then reads across into the next as needed, with one file open at a time. The converter reads the disc's file system out of order first and then its data mostly in order, through the usual `ReadAheadSource`, so this costs about what reading a single file would.
+
+## Names
+
+What the dashboard shows is the Store's name for the disc's title ID when its lists have one (with *(Disc N)* for a multi-disc game), and otherwise the release title tidied by `UsenetDisplayName`: dots and underscores to spaces, the `-GROUP` tag off the end.
+
+## Room
+
+The check before downloading wants twice the download's size — the files, and the game converted from them — plus a margin. `InstallImage` checks again, exactly, once it knows how big the game is. Reading the image straight out of the volumes is what keeps this at twice rather than three times: nothing is ever unpacked.
+
+## Not done yet
+
+- par2 verification and repair.
+- Decompressing RAR (and 7z).
+- Obfuscated posts — random file names, made right only by par2.
+- Resuming a download across a restart: the staging folder is cleared when Omni360 starts.
+- A Settings page section for the Usenet keys: they're `settings.txt` only.

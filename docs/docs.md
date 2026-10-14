@@ -17,6 +17,7 @@ The ATG framework under `Common/` is intentionally not documented in depth. It i
 4. [Runtime Flow](runtime-flow.md) - startup and download flow. **Stale** - describes the old `showUI()`/`getGame()` path, not this fork's.
 5. [Networking And TLS](networking-and-tls.md) - DNS, XboxTLS, trust anchors, BearSSL integration, HTTPS request setup. Still accurate.
 6. [HTTP Downloads](http-downloads.md) - response parsing, redirect handling, chunked decoding, progress reporting. Still largely accurate. Note one thing it does not say: file-mode requests do **not** follow redirects, so a 302 has to be re-resolved through buffer mode by the caller.
+7. [Usenet](usenet.md) - searching Prowlarr, the on-console NNTP downloader, yEnc, NZBs, and reading a disc image out of stored RAR volumes. **New in Omni360** and accurate.
 
 ## What this fork actually does
 

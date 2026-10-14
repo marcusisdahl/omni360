@@ -18,6 +18,11 @@ DESCRIPTION : Downloads a Redump game's zip from archive.org and installs it as
 #include "OutputConsole.h"
 #include "RarHeaders.h"     // a game kept in a RAR, uncompressed
 #include "zlib/zlib.h"      // crc32, for checking one
+#include "Usenet.h"         // a game from Usenet: the settings and the NZB
+#include "Nzb.h"
+#include "Nntp.h"
+#include "RarVolumes.h"     // its image, out of stored RAR volumes
+#include "StoreCatalog.h"   // StoreGameByTitleId, for its name
 
 #include <xtl.h>
 #include <stdio.h>
@@ -25,6 +30,9 @@ DESCRIPTION : Downloads a Redump game's zip from archive.org and installs it as
 #include <string.h>
 #include <stdarg.h>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <ctype.h>
 
 #define PIECE_SIZE        (32ULL * 1024 * 1024)
 #define CONNECTIONS       2
@@ -1069,8 +1077,109 @@ static int RankServers(GameJob *job, const std::string &redirected, const char *
     return n;
 }
 
+// A disc image, installed as Games on Demand: read for what it is, checked
+// for room, and converted, with the game's icon. True once it's installed,
+// with *outInfo saying what it was; false with the job finished, saying why.
+// name is what the dashboard shows - or, with catalogName, the Store's name
+// for the disc's title ID when its lists have one.
+static bool InstallImage(GameJob *job, const char *gamesPath, GodSource *image, const char *name,
+                         bool catalogName, GodImageInfo *outInfo)
+{
+    GodImageInfo &info = *outInfo;
+    GodResult result = GodInspect(image, &info);
+    if (result != GOD_OK)
+    {
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't install", GodResultText(result), true);
+        return false;
+    }
+
+    dprintf("[game] %s image: title %08lX, media %08lX, %I64u bytes to install\n", info.imageType,
+            info.title.titleId, info.title.mediaId, info.outputSize);
+    EnterCriticalSection(&g_lock);
+    job->snap.titleId = info.title.titleId;
+    LeaveCriticalSection(&g_lock);
+
+    static StoreGame known;
+    char nameBuffer[128];
+    if (catalogName && StoreGameByTitleId(info.title.titleId, &known) && known.name != NULL && known.name[0] != '\0')
+    {
+        if (info.title.discCount > 1 && info.title.discNumber > 0)
+            _snprintf(nameBuffer, sizeof(nameBuffer), "%s (Disc %u)", known.name, (unsigned)info.title.discNumber);
+        else
+            _snprintf(nameBuffer, sizeof(nameBuffer), "%s", known.name);
+        nameBuffer[sizeof(nameBuffer) - 1] = '\0';
+        name = nameBuffer;
+    }
+
+    unsigned long long freeSpace = 0;
+    if (DriveFreeSpace(gamesPath, &freeSpace) && freeSpace < info.outputSize + SPACE_MARGIN)
+    {
+        char needText[64] = "", freeText[64] = "", detail[160];
+        FormatBytes(info.outputSize, needText, sizeof(needText));
+        FormatBytes(freeSpace, freeText, sizeof(freeText));
+        _snprintf(detail, sizeof(detail), "It needs %s, and %s is free.", needText, freeText);
+        detail[sizeof(detail) - 1] = '\0';
+        FinishLocked(job, QUEUE_OUTCOME_NO_SPACE, "Not enough space", detail, true);
+        return false;
+    }
+
+    ConvertProgress progress;
+    progress.job = job;
+    progress.started = GetTickCount();
+    SetPhase(job, "Installing", 0, info.usedSize, 0);
+
+    // The game's icon for the package, so the dashboard and Aurora show it.
+    // Without one the install goes ahead, with the dashboard's placeholder.
+    static unsigned char icon[GOD_ICON_MAX];
+    unsigned long iconSize = 0;
+    if (!FetchTitleIcon(info.title.titleId, icon, sizeof(icon), &iconSize))
+        iconSize = 0;
+
+    WriteInstallMarker(gamesPath, info, name);
+
+    char packagePath[600] = "";
+    GodTimings timings;
+    memset(&timings, 0, sizeof(timings));
+    {
+        // Reading - decompressing, for a zip - runs on the read-ahead's
+        // thread while this one hashes and writes. Scoped so it has finished
+        // before the image goes.
+        ReadAheadSource ahead(image, 1024 * 1024, 8);
+        result = GodConvert(&ahead, info, gamesPath, name, iconSize > 0 ? icon : NULL, iconSize,
+                            ConvertProgressFn, &progress, packagePath, sizeof(packagePath), &timings);
+    }
+    ClearInstallMarker();
+
+    DWORD seconds = (GetTickCount() - progress.started) / 1000;
+    dprintf("[game] install %s after %lu:%02lu: %s\n", GodResultText(result), (unsigned long)(seconds / 60),
+            (unsigned long)(seconds % 60), packagePath);
+    if (seconds > 0)
+        dprintf("[game] %I64u MB at %.2f MB/s - waiting for data %.0fs, hashing %.0fs, writing %.0fs\n",
+                info.usedSize / (1024 * 1024), (double)info.usedSize / (1024.0 * 1024.0) / (double)seconds,
+                timings.readMs / 1000.0, timings.hashMs / 1000.0, timings.writeMs / 1000.0);
+
+    if (result == GOD_OK)
+        return true;
+    if (result == GOD_CANCELLED)
+        FinishLocked(job, QUEUE_OUTCOME_CANCELLED, "Stopped", "Nothing was installed.", false);
+    else if (result == GOD_WRITE_FAILED)
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't write the game",
+                     "Check the drive the games folder is on, then try again.", true);
+    else
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't install", GodResultText(result), true);
+    return false;
+}
+
+static void RunUsenetJob(GameJob *job, const char *gamesPath); // below
+
 static void RunJob(GameJob *job, const char *gamesPath)
 {
+    if (job->request.usenet)
+    {
+        RunUsenetJob(job, gamesPath);
+        return;
+    }
+
     const GameRequest &req = job->request;
     const char *auth = job->auth;
 
@@ -1390,86 +1499,317 @@ static void RunJob(GameJob *job, const char *gamesPath)
     GodSource *image = stored ? (GodSource *)&storedImage : (GodSource *)&inflated;
 
     GodImageInfo info;
-    GodResult result = GodInspect(image, &info);
-    if (result != GOD_OK)
-    {
-        free(points);
-        RemoveFolder(dir);
-        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't install", GodResultText(result), true);
-        return;
-    }
-
-    dprintf("[game] %s image: title %08lX, media %08lX, %I64u bytes to install\n", info.imageType,
-            info.title.titleId, info.title.mediaId, info.outputSize);
-    EnterCriticalSection(&g_lock);
-    job->snap.titleId = info.title.titleId;
-    LeaveCriticalSection(&g_lock);
-
-    if (DriveFreeSpace(gamesPath, &freeSpace) && freeSpace < info.outputSize + SPACE_MARGIN)
-    {
-        char needText[64] = "", freeText[64] = "", detail[160];
-        FormatBytes(info.outputSize, needText, sizeof(needText));
-        FormatBytes(freeSpace, freeText, sizeof(freeText));
-        _snprintf(detail, sizeof(detail), "It needs %s, and %s is free.", needText, freeText);
-        detail[sizeof(detail) - 1] = '\0';
-        free(points);
-        RemoveFolder(dir);
-        FinishLocked(job, QUEUE_OUTCOME_NO_SPACE, "Not enough space", detail, true);
-        return;
-    }
-
-    ConvertProgress progress;
-    progress.job = job;
-    progress.started = GetTickCount();
-    SetPhase(job, "Installing", 0, info.usedSize, 0);
-
-    // The game's icon for the package, so the dashboard and Aurora show it.
-    // Without one the install goes ahead, with the dashboard's placeholder.
-    static unsigned char icon[GOD_ICON_MAX];
-    unsigned long iconSize = 0;
-    if (!FetchTitleIcon(info.title.titleId, icon, sizeof(icon), &iconSize))
-        iconSize = 0;
-
-    WriteInstallMarker(gamesPath, info, req.name);
-
-    char packagePath[600] = "";
-    GodTimings timings;
-    memset(&timings, 0, sizeof(timings));
-    {
-        // Decompressing runs on the read-ahead's thread while this one
-        // hashes and writes. Scoped so it has finished before the image goes.
-        ReadAheadSource ahead(image, 1024 * 1024, 8);
-        result = GodConvert(&ahead, info, gamesPath, req.name, iconSize > 0 ? icon : NULL, iconSize,
-                            ConvertProgressFn, &progress, packagePath, sizeof(packagePath), &timings);
-    }
-    ClearInstallMarker();
-
-    DWORD seconds = (GetTickCount() - progress.started) / 1000;
-    dprintf("[game] install %s after %lu:%02lu (%lu restarts): %s\n", GodResultText(result),
-            (unsigned long)(seconds / 60), (unsigned long)(seconds % 60), inflated.Restarts(), packagePath);
-    if (seconds > 0)
-        dprintf("[game] %I64u MB at %.2f MB/s - waiting for data %.0fs, hashing %.0fs, writing %.0fs\n",
-                info.usedSize / (1024 * 1024), (double)info.usedSize / (1024.0 * 1024.0) / (double)seconds,
-                timings.readMs / 1000.0, timings.hashMs / 1000.0, timings.writeMs / 1000.0);
-
+    const bool installed = InstallImage(job, gamesPath, image, req.name, false, &info);
+    if (!stored)
+        dprintf("[game] %lu inflate restarts\n", inflated.Restarts());
     free(points);
     RemoveFolder(dir);
 
-    if (result == GOD_OK)
+    if (installed)
     {
         // Noted before it's reported, so the Store never sees it finished
         // but not installed.
         RecordInstalledZip(req.zipName, info.title.titleId, info.title.mediaId);
-        FinishLocked(job, QUEUE_OUTCOME_INSTALLED, "Installed",
-                     "Play it from the dashboard or Aurora.", true);
+        FinishLocked(job, QUEUE_OUTCOME_INSTALLED, "Installed", "Play it from the dashboard or Aurora.", true);
     }
-    else if (result == GOD_CANCELLED)
-        FinishLocked(job, QUEUE_OUTCOME_CANCELLED, "Stopped", "Nothing was installed.", false);
-    else if (result == GOD_WRITE_FAILED)
-        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't write the game",
-                     "Check the drive the games folder is on, then try again.", true);
+}
+
+// ---------------------------------------------------------------------------
+// A game from Usenet
+// ---------------------------------------------------------------------------
+//
+// The NZB comes through Prowlarr, the post is downloaded from the user's
+// provider into a staging folder (Nntp.h), and each disc image in it - a
+// bare .iso, or one read straight out of stored RAR volumes (RarVolumes.h) -
+// is installed as any other game is. The folder goes when the job ends.
+
+struct UsenetProgress
+{
+    GameJob *job;
+    DWORD started;
+};
+
+static bool UsenetDownloadProgress(const NntpProgress &p, void *context)
+{
+    UsenetProgress *u = (UsenetProgress *)context;
+    char phase[64];
+    if (p.missing > 0)
+        _snprintf(phase, sizeof(phase), "Downloading - %lu article%s missing", p.missing, p.missing == 1 ? "" : "s");
+    else if (p.connections > 0)
+        _snprintf(phase, sizeof(phase), "Downloading - %d connection%s", p.connections, p.connections == 1 ? "" : "s");
     else
-        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't install", GodResultText(result), true);
+        _snprintf(phase, sizeof(phase), "Connecting");
+    phase[sizeof(phase) - 1] = '\0';
+    const DWORD ms = GetTickCount() - u->started;
+    SetPhase(u->job, phase, p.done, p.total, ms > 3000 ? p.done * 1000 / ms : 0);
+    return !Cancelled(u->job);
+}
+
+// A disc image found in the download, and the files its bytes are in.
+struct FoundImage
+{
+    std::string name;
+    std::vector<std::string> paths;
+    std::vector<ImageSpan> spans;
+};
+
+static bool ByName(const FoundImage &a, const FoundImage &b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; }
+
+struct RarVolumeFile
+{
+    int order;
+    std::string path;
+};
+
+static bool ByOrder(const RarVolumeFile &a, const RarVolumeFile &b) { return a.order < b.order; }
+
+// The disc images among the downloaded files. When there are none, *problem
+// says why, for the screen.
+static void FindImages(const Nzb &nzb, const char *dir, std::vector<FoundImage> *out, std::string *problem)
+{
+    std::vector<std::string> setNames;
+    std::vector<std::vector<RarVolumeFile> > sets;
+    int files = 0;
+
+    for (int f = 0; f < nzb.fileCount; ++f)
+    {
+        const NzbFile &file = nzb.files[f];
+        if (file.par2)
+            continue;
+        char path[320];
+        NntpFilePath(dir, f, path, sizeof(path));
+        const unsigned long long size = FileSize(path);
+        if (size == 0)
+            continue;
+        files++;
+
+        std::string base;
+        int order = 0;
+        if (RarVolumeName(file.name, &base, &order))
+        {
+            for (size_t i = 0; i < base.length(); ++i)
+                base[i] = (char)tolower((unsigned char)base[i]);
+            size_t set = 0;
+            while (set < setNames.size() && setNames[set] != base)
+                set++;
+            if (set == setNames.size())
+            {
+                setNames.push_back(base);
+                sets.push_back(std::vector<RarVolumeFile>());
+            }
+            RarVolumeFile volume;
+            volume.order = order;
+            volume.path = path;
+            sets[set].push_back(volume);
+        }
+        else if (IsUsenetDiscImage(file.name, size))
+        {
+            FoundImage image;
+            image.name = file.name;
+            image.paths.push_back(path);
+            ImageSpan span;
+            span.file = 0;
+            span.offset = 0;
+            span.length = size;
+            image.spans.push_back(span);
+            out->push_back(image);
+        }
+    }
+
+    for (size_t set = 0; set < sets.size(); ++set)
+    {
+        std::sort(sets[set].begin(), sets[set].end(), ByOrder);
+        std::vector<std::string> paths;
+        for (size_t v = 0; v < sets[set].size(); ++v)
+            paths.push_back(sets[set][v].path);
+
+        std::vector<RarImage> entries;
+        const RarWalkResult walk = RarWalkVolumes(paths, &entries);
+        dprintf("[usenet] RAR set %u: %u volume(s), %u file(s), walk %d\n", (unsigned)set, (unsigned)paths.size(),
+                (unsigned)entries.size(), (int)walk);
+        if (walk == RAR_WALK_ENCRYPTED)
+        {
+            *problem = "The RAR has a password.";
+            continue;
+        }
+        if (walk == RAR_WALK_UNREADABLE)
+        {
+            *problem = "A RAR volume couldn't be read.";
+            continue;
+        }
+
+        for (size_t e = 0; e < entries.size(); ++e)
+        {
+            const RarImage &entry = entries[e];
+            if (!IsUsenetDiscImage(entry.name.c_str(), entry.size))
+                continue;
+            if (entry.encrypted)
+                *problem = "The RAR has a password.";
+            else if (!entry.stored)
+                *problem = "The RAR is compressed - only stored (-m0) RARs can be read on the console.";
+            else if (walk == RAR_WALK_INCOMPLETE)
+                *problem = "Some of the RAR's volumes are missing from the post.";
+            else
+            {
+                FoundImage image;
+                image.name = entry.name;
+                image.paths = paths;
+                image.spans = entry.spans;
+                out->push_back(image);
+            }
+        }
+    }
+
+    if (out->empty() && problem->empty())
+    {
+        char text[160];
+        _snprintf(text, sizeof(text), "Its %d file%s hold no .iso or RAR volumes%s.", files, files == 1 ? "" : "s",
+                  files > 0 ? " - the names may be obfuscated" : "");
+        text[sizeof(text) - 1] = '\0';
+        *problem = text;
+    }
+    std::sort(out->begin(), out->end(), ByName);
+}
+
+static void RunUsenetJob(GameJob *job, const char *gamesPath)
+{
+    const GameRequest &req = job->request;
+    SetPhase(job, "Starting", 0, 0, 0);
+
+    UsenetConfig config;
+    const UsenetSetup setup = LoadUsenetConfig(&config);
+    if (setup != USENET_READY)
+    {
+        const char *heading = "", *detail = "";
+        UsenetSetupText(setup, &heading, &detail);
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, heading, detail, true);
+        return;
+    }
+
+    SetPhase(job, "Getting the NZB", 0, 0, 0);
+    char error[160] = "";
+    unsigned long nzbLen = 0;
+    char *xml = FetchNzb(req.nzbUrl, config.prowlarrKey, &nzbLen, error, sizeof(error));
+    if (xml == NULL)
+    {
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't get the NZB", error, true);
+        return;
+    }
+    Nzb nzb;
+    const bool parsed = NzbParse(xml, &nzb);
+    free(xml);
+    if (!parsed)
+    {
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't read the NZB", "It lists no files to download.", true);
+        return;
+    }
+
+    // Room for the download and the game: the game is at most the image, and
+    // the image at most the download.
+    unsigned long long downloadBytes = 0;
+    for (int f = 0; f < nzb.fileCount; ++f)
+    {
+        if (!nzb.files[f].par2)
+            downloadBytes += nzb.files[f].bytes;
+    }
+    unsigned long long freeSpace = 0;
+    if (DriveFreeSpace(gamesPath, &freeSpace) && freeSpace < downloadBytes * 2 + SPACE_MARGIN)
+    {
+        char needText[64] = "", freeText[64] = "", detail[160];
+        FormatBytes(downloadBytes * 2, needText, sizeof(needText));
+        FormatBytes(freeSpace, freeText, sizeof(freeText));
+        _snprintf(detail, sizeof(detail), "It needs up to %s while it installs, and %s is free.", needText, freeText);
+        detail[sizeof(detail) - 1] = '\0';
+        NzbFree(&nzb);
+        FinishLocked(job, QUEUE_OUTCOME_NO_SPACE, "Not enough space", detail, true);
+        return;
+    }
+
+    char root[300], dir[320];
+    StagingRoot(gamesPath, root, sizeof(root));
+    CreateDirectoryA(root, NULL);
+    _snprintf(dir, sizeof(dir), "%s\\U%d", root, job->snap.id);
+    dir[sizeof(dir) - 1] = '\0';
+    RemoveFolder(dir);
+    if (!CreateDirectoryA(dir, NULL))
+    {
+        NzbFree(&nzb);
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't install", "The staging folder couldn't be made.", true);
+        return;
+    }
+
+    // --- Download -------------------------------------------------------------
+    UsenetProgress progress;
+    progress.job = job;
+    progress.started = GetTickCount();
+    SetPhase(job, "Connecting", 0, downloadBytes, 0);
+    unsigned long missing = 0;
+    const NntpResult downloaded =
+        NntpDownload(config.server, &nzb, dir, UsenetDownloadProgress, &progress, &missing, error, sizeof(error));
+    if (downloaded != NNTP_OK)
+    {
+        NzbFree(&nzb);
+        RemoveFolder(dir);
+        if (downloaded == NNTP_CANCELLED)
+            FinishLocked(job, QUEUE_OUTCOME_CANCELLED, "Stopped", "Nothing was installed.", false);
+        else if (downloaded == NNTP_AUTH_FAILED)
+            FinishLocked(job, QUEUE_OUTCOME_FAILED, "Usenet login refused", error, true);
+        else if (downloaded == NNTP_WRITE_FAILED)
+            FinishLocked(job, QUEUE_OUTCOME_FAILED, "Couldn't write the download", error, true);
+        else if (downloaded == NNTP_INCOMPLETE)
+            FinishLocked(job, QUEUE_OUTCOME_FAILED, "Download incomplete", error, true);
+        else
+            FinishLocked(job, QUEUE_OUTCOME_FAILED, "Download failed", error, true);
+        return;
+    }
+
+    // --- Find the disc images, and install each -------------------------------
+    SetPhase(job, "Finding the disc image", 0, 0, 0);
+    std::vector<FoundImage> images;
+    std::string problem;
+    FindImages(nzb, dir, &images, &problem);
+    NzbFree(&nzb);
+    if (images.empty())
+    {
+        RemoveFolder(dir);
+        FinishLocked(job, QUEUE_OUTCOME_FAILED, "No disc image to install", problem.c_str(), true);
+        return;
+    }
+
+    for (size_t i = 0; i < images.size(); ++i)
+    {
+        const FoundImage &found = images[i];
+        dprintf("[usenet] installing image %u of %u (%u slice(s))\n", (unsigned)(i + 1), (unsigned)images.size(),
+                (unsigned)found.spans.size());
+        EnterCriticalSection(&g_lock);
+        _snprintf(job->snap.title, sizeof(job->snap.title), "%s", found.name.c_str());
+        job->snap.title[sizeof(job->snap.title) - 1] = '\0';
+        LeaveCriticalSection(&g_lock);
+
+        char name[128];
+        if (images.size() > 1)
+            _snprintf(name, sizeof(name), "%s (Disc %u)", req.name, (unsigned)(i + 1));
+        else
+            _snprintf(name, sizeof(name), "%s", req.name);
+        name[sizeof(name) - 1] = '\0';
+
+        SpanSource source(found.paths, found.spans);
+        GodImageInfo info;
+        if (!InstallImage(job, gamesPath, &source, name, true, &info))
+        {
+            RemoveFolder(dir);
+            return; // finished, saying why
+        }
+    }
+
+    RemoveFolder(dir);
+    char detail[96];
+    if (images.size() > 1)
+        _snprintf(detail, sizeof(detail), "All %u discs - play it from the dashboard or Aurora.", (unsigned)images.size());
+    else
+        _snprintf(detail, sizeof(detail), "Play it from the dashboard or Aurora.");
+    detail[sizeof(detail) - 1] = '\0';
+    FinishLocked(job, QUEUE_OUTCOME_INSTALLED, "Installed", detail, true);
 }
 
 // ---------------------------------------------------------------------------

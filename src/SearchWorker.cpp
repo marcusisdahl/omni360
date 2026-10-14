@@ -69,10 +69,20 @@ static DWORD WINAPI SearchEntry(LPVOID)
         }
 
         dprintf("[search] %s for \"%s\" (request %d)\n",
-                g_working.kind == SEARCH_DLC ? "DLC" : "title updates", gameName, g_working.requestId);
+                g_working.kind == SEARCH_DLC ? "DLC" : g_working.kind == SEARCH_USENET ? "Usenet releases" : "title updates",
+                gameName, g_working.requestId);
 
+        g_working.error[0] = '\0';
         if (g_working.kind == SEARCH_DLC)
             g_working.count = FindDlcRarFilenames(gameName, g_working.packs, MAX_DLC_RAR_MATCHES, dprintf);
+        else if (g_working.kind == SEARCH_USENET)
+        {
+            // Read each time, so a change to settings.txt counts without a restart.
+            static UsenetConfig config;
+            LoadUsenetConfig(&config);
+            g_working.count = UsenetSearch(config, gameName, g_working.releases, MAX_USENET_RESULTS,
+                                           g_working.error, sizeof(g_working.error));
+        }
         else
             g_working.count = FindTitleUpdates(gameName, g_working.updates, MAX_TITLE_UPDATE_MATCHES, dprintf);
 

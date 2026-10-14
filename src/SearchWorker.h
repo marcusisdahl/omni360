@@ -3,9 +3,11 @@
 
 #include <xtl.h> // DWORD
 #include "ArchiveOrgDLC.h"
+#include "Usenet.h"
 
 // ---------------------------------------------------------------------------
-// Searches for a game's DLC and title updates, off the UI thread
+// Searches for a game's DLC and title updates - and Usenet releases - off
+// the UI thread
 // ---------------------------------------------------------------------------
 //
 // A search is a request to archive.org plus a match against a whole
@@ -24,16 +26,19 @@
 enum SearchKind
 {
     SEARCH_DLC,
-    SEARCH_TITLE_UPDATES
+    SEARCH_TITLE_UPDATES,
+    SEARCH_USENET        // Prowlarr, for what the user typed (Usenet.h)
 };
 
 struct SearchResult
 {
     int requestId;
     SearchKind kind;
-    int count; // matches found; -1 if archive.org couldn't be reached
+    int count; // matches found; -1 if archive.org (or Prowlarr) couldn't be reached
     DlcRarMatch packs[MAX_DLC_RAR_MATCHES];             // SEARCH_DLC
     TitleUpdateMatch updates[MAX_TITLE_UPDATE_MATCHES]; // SEARCH_TITLE_UPDATES
+    UsenetRelease releases[MAX_USENET_RESULTS];         // SEARCH_USENET
+    char error[160];                                    // SEARCH_USENET, when count is -1: why
 };
 
 // False if the thread couldn't be created - BeginSearch then returns 0.
@@ -44,7 +49,7 @@ bool StartSearchWorker();
 bool StopSearchWorker(DWORD timeoutMs);
 
 // Asks for a search and returns its request id, or 0 if the worker isn't
-// running. gameName is copied.
+// running. gameName - for SEARCH_USENET, what was typed - is copied.
 int BeginSearch(SearchKind kind, const char *gameName);
 
 // True once the search with this id has finished, with its result in *out.

@@ -28,8 +28,16 @@
 // and title updates or a disc install. Jobs are reported in the download
 // queue's terms, for the Queue page.
 
+//
+// A game can come from Usenet instead (Usenet.h): its NZB is fetched through
+// Prowlarr, the post is downloaded from the user's provider into the staging
+// folder (Nntp.h), and each disc image in it - a bare .iso, or one read
+// straight out of stored RAR volumes (RarVolumes.h) - is installed the same
+// way. The download and the game both need room while it installs.
+
 #define GAME_JOB_ID_BASE 2000000
 #define MAX_GAME_JOBS 8
+#define GAME_NZB_URL_MAX 1536
 
 inline bool IsGameJobId(int id) { return id >= GAME_JOB_ID_BASE; }
 
@@ -40,6 +48,12 @@ struct GameRequest
     unsigned long long zipSize;
     char name[128];     // what the dashboard shows, UTF-8
     unsigned long titleId; // for the Queue's box art; 0 if not known yet
+
+    // From Usenet instead: item is "usenet", zipName the release's title,
+    // zipSize its size, and this where Prowlarr has its NZB. The dashboard
+    // gets the Store's name for the disc when it has one, and name if not.
+    bool usenet;
+    char nzbUrl[GAME_NZB_URL_MAX];
 };
 
 // gamesPath is where games install. Also clears out any staging folder an

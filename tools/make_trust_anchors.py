@@ -31,6 +31,20 @@ And a fourth, for the update check (Oct 2026):
     release downloads (objects/release-assets.githubusercontent.com) chain to
     ISRG X1, already here.
 
+And five more, for Usenet providers' NNTP over TLS (Oct 2026), all from
+Mozilla's root store as extracted by curl ("as of Sep 25 2026"):
+  - GTS_Root_R4.pem (SHA-256 349DFA40...031B3C7D) and GTS_Root_R1.pem
+    (D947432A...57A7F4CF): Google Trust Services, for anything behind
+    Cloudflare - its ECDSA chains run leaf -> WE1 -> GTS Root R4, checked
+    against R4 alone with `openssl verify`; R1 is the same CA's RSA root.
+  - DigiCert_Global_Root_G2.pem (CB3CCBB7...5AB1CB5F), USERTrust_RSA.pem
+    (E793C9B0...C3D4CBD2), Sectigo_R46.pem (7BB647A6...EC38F25A06): the
+    other CAs providers' certificates commonly chain to.
+  Providers' NNTPS ports couldn't be reached from where these were chosen,
+  so no provider's chain was checked against them; Newshosting's (on 443)
+  chains to ISRG X1, already here. A provider on some other CA needs its
+  root added here - or usenet-ssl: off, see Usenet.h.
+
 For each certificate this emits what BearSSL's br_x509_trust_anchor needs:
 the subject DN, exactly as DER-encoded in the certificate (BearSSL compares
 DNs byte for byte against each issuer), and the public key - an RSA modulus

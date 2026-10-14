@@ -10,6 +10,9 @@ Start-to-finish setup for a console you already have modded. Adapted from X-Stor
 - An archive.org account. Every collection Omni360 downloads from is marked private, so an anonymous request gets a hard 401 — the keys below are genuinely required, not optional.
 - Room on the drive your games go to, if you'll install games: while a game installs, both its download (around 7GB) and the installed game (3-8GB) are on the drive. The download is removed once it's installed.
 
+**Optional:**
+- [Prowlarr](https://prowlarr.com/) and a Usenet provider account, for the Store's **Usenet** button. See step 7.
+
 **Not required:**
 - Xbox Live
 - Stealth server
@@ -78,6 +81,48 @@ Launch `Omni360.xex` from a file manager or your dashboard's home screen.
 
 Because DLC matching is deliberately loose — it has to cope with release-group naming like `Halo.1.Combat.Evolved.Anniversary` — read the filename before confirming. That check is the reason auto-selection was removed.
 
+## 7. Optional: Usenet
+
+The Store's **Usenet** button searches your own [Prowlarr](https://prowlarr.com/) and downloads the release you pick straight from your Usenet provider, on the console — an NZBGet-style downloader built into Omni360 — then installs the disc image in it as Games on Demand. You need:
+
+- **Prowlarr**, running on a PC or NAS the console can reach, with your indexers added to it. Its API key is in Prowlarr under **Settings → General**.
+- **A Usenet provider account**: its server name, your user name and password, and how many connections your plan allows.
+
+Add these to `settings.txt`:
+
+```
+prowlarr-url: http://192.168.1.10:9696
+prowlarr-key: 0123456789abcdef0123456789abcdef
+usenet-host: news.example.com
+usenet-user: your-user-name
+usenet-pass: your-password
+usenet-connections: 8
+```
+
+Optional keys:
+
+- `usenet-ssl: off` — plain NNTP rather than TLS. TLS is the default, on port 563. The 360 decrypts TLS in software, so turning it off can be faster, if your provider offers port 119 — but the user name and password then cross the network unencrypted.
+- `usenet-port:` — a port other than 563 (TLS) or 119 (plain).
+- `usenet-connections:` — 8 by default, 16 at most. Stay within your plan's limit; a provider turns away connections over it.
+- `usenet-categories: 1000,1050` — only search these Newznab categories. Without it, every category is searched.
+
+**These are plain text, like your archive.org keys.** The same caution applies.
+
+Then **Store → Usenet**: type what to search for, and the releases Prowlarr finds are listed, newest first, with each one's size, indexer, date and grabs. **A** adds one to the Queue, where it shows the NZB being fetched, the download (with how many connections are up), then the install. A post of several discs installs each of them.
+
+What it can install:
+
+- **A bare `.iso`** in the post.
+- **A disc image in RAR volumes**, if they're *stored* — packed with no compression (`-m0`), as console images usually are. The image is read straight out of the volumes, so it's never unpacked: no second copy on the drive. Old-style (`.rar`, `.r00`, `.r01` …) and new-style (`.part01.rar` …) names both work.
+
+What it can't, yet:
+
+- **par2 repair.** `.par2` files aren't downloaded. If the provider is missing an article, or one arrives damaged, the job says how many and stops — try another release.
+- **Compressed RARs, 7z, and passwords.**
+- **Obfuscated posts**, whose file names are random until par2 renames them.
+
+Room needed is the download and the game, as with archive.org: about twice the release's size while it installs. The download is removed afterwards.
+
 ## Troubleshooting
 
 `game:\DebugInfo.txt` is the log, and it keeps recording even once the drawn UI takes over the screen. Check it first.
@@ -90,6 +135,11 @@ Because DLC matching is deliberately loose — it has to cope with release-group
 - **No DLC or updates for a game you know has them** — the collection may genuinely not have them, or the game's display name may be too abbreviated to match. Not every title has DLC or updates archived.
 - **Game pages with no description, wallpaper or screenshots** — they come from Xbox Live's servers, and DashLaunch's `livestrong` setting blocks those (the log shows `[dns] download.xbox.com: the DNS server says there's no such name`). Box art still comes from xboxunity, and downloads from archive.org are unaffected. Turn `livestrong` off in `launch.ini` if you want the details; `liveblock` on its own doesn't block them.
 - **Nothing will connect, but Aurora can** — look for `WSA error 10060` in the log: every connection is timing out, so something between the console and the internet is dropping the app's connections. Open an issue on GitHub with the log; it helps to say how the console is modded and which plugins it runs.
+- **"Could not search Prowlarr"** — the line under it says why. "Couldn't reach Prowlarr" means the console can't get to `prowlarr-url:` — use the PC's IP address rather than its name, and check the port (9696 by default) is open to the network. "Refused the API key" means `prowlarr-key:` is wrong.
+- **"Usenet login refused"** — check `usenet-user:` and `usenet-pass:`. "Turned the connection away" with a 502 in the log is usually your plan's connection limit: lower `usenet-connections:`.
+- **"Couldn't make a secure connection"** to your Usenet provider — its certificate chains to a root Omni360 doesn't carry (`tools/make_trust_anchors.py` lists them). Try `usenet-ssl: off` if your provider offers plain NNTP, or open an issue naming the provider.
+- **"Download incomplete"** — articles were missing or damaged, and there's no par2 repair on the console. Pick another release of the same game.
+- **"No disc image to install"** — the line under it says what was found instead: a compressed RAR, a password, or names that look obfuscated.
 - **Garbled game names** — STFS display-name encoding. `StfsParser.cpp` detects UTF-8 versus UTF-16BE per file and re-encodes both to UTF-8. If a name still looks wrong, that is worth reporting rather than expected.
 
 A game download picks up where it stopped after a stall, but not across a restart: quitting the app mid-download removes what was downloaded, and it has to be started again. DLC and title update downloads that fail have to be retried by hand.

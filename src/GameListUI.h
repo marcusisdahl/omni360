@@ -281,16 +281,16 @@ struct SettingsPageView
 void RenderSettingsFrame(SettingsPageView &view, const UiHint *hints, int hintCount);
 
 // The Store's front page: one to five featured games - one large tile, the
-// rest smaller beside it - with their marketplace wallpaper, a row of four
+// rest smaller beside it - with their marketplace wallpaper, a row of five
 // buttons, and the A-Z tiles.
 //
 // focus runs through them in that order: STORE_FOCUS_FEATURED + 0 to the
-// featured count less one, then STORE_FOCUS_BUTTONS + 0..3, then
+// featured count less one, then STORE_FOCUS_BUTTONS + 0..4, then
 // STORE_FOCUS_LETTERS + 0..26. The page scrolls so the A-Z tiles come into
 // view when one of them has focus; scroll is the caller's to keep between
 // frames, and the Render call eases it.
 #define STORE_FEATURED_MAX   5
-#define STORE_BUTTON_COUNT   4
+#define STORE_BUTTON_COUNT   5
 #define STORE_LETTER_COUNT   27 // '#', then A to Z
 
 #define STORE_FOCUS_FEATURED 0

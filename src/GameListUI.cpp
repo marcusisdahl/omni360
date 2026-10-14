@@ -4326,7 +4326,7 @@ static StoreLayout LayOutStore()
 
     L.btnY = L.top + L.heroH + S(24.0f);
     L.btnH = S(52.0f);
-    L.btnW = (g_M.contentW - 3.0f * L.gap) / STORE_BUTTON_COUNT;
+    L.btnW = (g_M.contentW - (STORE_BUTTON_COUNT - 1) * L.gap) / STORE_BUTTON_COUNT;
 
     L.azLabelY = L.btnY + L.btnH + S(30.0f);
     L.azY = L.azLabelY + LineHeight(0.95f) * 1.3f + S(8.0f);

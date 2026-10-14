@@ -169,6 +169,21 @@
     <ClCompile Include="src\RarHeaders.cpp">
       <Filter>Source Files\Installs</Filter>
     </ClCompile>
+    <ClCompile Include="src\Usenet.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Nzb.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Nntp.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Yenc.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RarVolumes.cpp">
+      <Filter>Source Files\Installs</Filter>
+    </ClCompile>
     <ClCompile Include="src\parsing.cpp">
       <Filter>Source Files\Support</Filter>
     </ClCompile>
@@ -1204,6 +1219,21 @@
       <Filter>Source Files\Store</Filter>
     </ClInclude>
     <ClInclude Include="src\RarHeaders.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Usenet.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Nzb.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Nntp.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Yenc.h">
+      <Filter>Source Files\Installs</Filter>
+    </ClInclude>
+    <ClInclude Include="src\RarVolumes.h">
       <Filter>Source Files\Installs</Filter>
     </ClInclude>
     <ClInclude Include="src\parsing.h">
