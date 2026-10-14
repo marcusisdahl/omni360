@@ -234,6 +234,12 @@ void XboxTLS_SetThreadIoTimeout(unsigned long timeoutMs);
  */
 void XboxTLS_SetThreadRecvBuffer(unsigned long bytes);
 
+/**
+ * @brief The cipher the server chose for a connected context, for the log:
+ * "ChaCha20-Poly1305", "AES-128-GCM", "AES-128-CBC" or "other".
+ */
+const char* XboxTLS_CipherName(XboxTLSContext* ctx);
+
 
 #ifdef __cplusplus
 }

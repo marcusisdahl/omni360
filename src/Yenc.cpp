@@ -9,7 +9,10 @@ DESCRIPTION : Decoding yEnc article bodies. See Yenc.h.
 #include <stdlib.h>
 #include <string.h>
 
-static unsigned long g_crcTable[256];
+// Slicing-by-4: four tables, four bytes a step - several times the speed of
+// one byte at a time, which matters at the 360's clock. The bytes are put
+// together by hand, so it's the same on its big-endian CPU.
+static unsigned long g_crcTable[4][256];
 static bool g_crcReady = false;
 
 unsigned long YencCrc32(unsigned long crc, const unsigned char *data, unsigned long len)
@@ -21,13 +24,26 @@ unsigned long YencCrc32(unsigned long crc, const unsigned char *data, unsigned l
             unsigned long c = i;
             for (int k = 0; k < 8; ++k)
                 c = (c & 1) ? 0xEDB88320UL ^ (c >> 1) : c >> 1;
-            g_crcTable[i] = c;
+            g_crcTable[0][i] = c;
+        }
+        for (unsigned long i = 0; i < 256; ++i)
+        {
+            for (int t = 1; t < 4; ++t)
+                g_crcTable[t][i] = (g_crcTable[t - 1][i] >> 8) ^ g_crcTable[0][g_crcTable[t - 1][i] & 0xFF];
         }
         g_crcReady = true;
     }
     crc = ~crc & 0xFFFFFFFFUL;
-    for (unsigned long i = 0; i < len; ++i)
-        crc = g_crcTable[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    unsigned long i = 0;
+    for (; i + 4 <= len; i += 4)
+    {
+        crc ^= (unsigned long)data[i] | ((unsigned long)data[i + 1] << 8) | ((unsigned long)data[i + 2] << 16) |
+               ((unsigned long)data[i + 3] << 24);
+        crc = g_crcTable[3][crc & 0xFF] ^ g_crcTable[2][(crc >> 8) & 0xFF] ^ g_crcTable[1][(crc >> 16) & 0xFF] ^
+              g_crcTable[0][(crc >> 24) & 0xFF];
+    }
+    for (; i < len; ++i)
+        crc = g_crcTable[0][(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     return ~crc & 0xFFFFFFFFUL;
 }
 

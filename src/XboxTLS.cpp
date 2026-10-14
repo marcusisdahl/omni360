@@ -260,8 +260,154 @@ static void XboxTLS_SetSocketOptions(SOCKET sock) {
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (PCSTR)&timeoutMs, sizeof(timeoutMs));
 }
 
+// ---------------------------------------------------------------------------
+// The fastest cipher code on this CPU
+// ---------------------------------------------------------------------------
+//
+// Decrypting is most of what a download costs the 360, and BearSSL has
+// several implementations of each piece, whose speed on the Xenon's in-order
+// cores only a measurement can tell: AES as constant-time bitslices (ct, ct64)
+// or lookup tables (big); GHASH with 32- or 64-bit multiplies; Poly1305 the
+// same. The first connection measures each for a few milliseconds, every
+// connection after uses the fastest, and the cipher suites are offered fastest
+// first. The tables aren't constant-time, which only matters against code
+// sharing the CPU - not a concern on a console running this alone.
+
+static volatile LONG g_tuneState = 0; // 0 not yet, 1 measuring, 2 done
+static const br_block_ctr_class *g_aesCtr = &br_aes_ct64_ctr_vtable;
+static const br_block_cbcdec_class *g_aesCbcDec = &br_aes_ct64_cbcdec_vtable;
+static const br_block_cbcenc_class *g_aesCbcEnc = &br_aes_ct64_cbcenc_vtable;
+static br_ghash g_ghash = &br_ghash_ctmul64;
+static br_poly1305_run g_poly1305 = &br_poly1305_ctmul_run;
+static bool g_chachaFirst = true;
+
+#define TUNE_BUFFER (64 * 1024)
+#define TUNE_MS     60
+
+// MB/s of fn over the buffer, run for about TUNE_MS.
+struct TuneRun
+{
+    virtual ~TuneRun() {}
+    virtual void Run(unsigned char *buf, size_t len) = 0;
+};
+
+static double Measure(TuneRun &run, unsigned char *buf)
+{
+    run.Run(buf, TUNE_BUFFER); // warm the caches
+    const DWORD start = GetTickCount();
+    unsigned long long bytes = 0;
+    DWORD elapsed = 0;
+    do
+    {
+        run.Run(buf, TUNE_BUFFER);
+        bytes += TUNE_BUFFER;
+        elapsed = GetTickCount() - start;
+    } while (elapsed < TUNE_MS);
+    return bytes / 1048576.0 / (elapsed / 1000.0);
+}
+
+struct CtrRun : TuneRun
+{
+    br_aes_gen_ctr_keys keys;
+    unsigned char iv[12];
+    CtrRun(const br_block_ctr_class *vt)
+    {
+        unsigned char key[16];
+        memset(key, 0x5A, sizeof(key));
+        memset(iv, 0x33, sizeof(iv));
+        vt->init(&keys.vtable, key, sizeof(key));
+    }
+    void Run(unsigned char *buf, size_t len) { keys.vtable->run(&keys.vtable, iv, 1, buf, len); }
+};
+
+struct GhashRun : TuneRun
+{
+    br_ghash ghash;
+    unsigned char y[16], h[16];
+    GhashRun(br_ghash g) : ghash(g)
+    {
+        memset(y, 0, sizeof(y));
+        memset(h, 0x6B, sizeof(h));
+    }
+    void Run(unsigned char *buf, size_t len) { ghash(y, h, buf, len); }
+};
+
+struct ChapolRun : TuneRun
+{
+    br_poly1305_run poly;
+    unsigned char key[32], iv[12], tag[16];
+    ChapolRun(br_poly1305_run p) : poly(p)
+    {
+        memset(key, 0x21, sizeof(key));
+        memset(iv, 0x44, sizeof(iv));
+    }
+    void Run(unsigned char *buf, size_t len) { poly(key, iv, buf, len, NULL, 0, tag, &br_chacha20_ct_run, 0); }
+};
+
+static void XboxTLS_Tune() {
+    if (InterlockedCompareExchange(&g_tuneState, 1, 0) != 0) {
+        while (g_tuneState != 2)
+            Sleep(5); // another connection is measuring - wait for its answer
+        return;
+    }
+
+    unsigned char *buf = (unsigned char *)malloc(TUNE_BUFFER);
+    if (buf != NULL) {
+        memset(buf, 0xA5, TUNE_BUFFER);
+
+        CtrRun big(&br_aes_big_ctr_vtable), ct64(&br_aes_ct64_ctr_vtable), ct(&br_aes_ct_ctr_vtable);
+        const double aesBig = Measure(big, buf), aesCt64 = Measure(ct64, buf), aesCt = Measure(ct, buf);
+        GhashRun g64(&br_ghash_ctmul64), g(&br_ghash_ctmul), g32(&br_ghash_ctmul32);
+        const double gh64 = Measure(g64, buf), gh = Measure(g, buf), gh32 = Measure(g32, buf);
+        ChapolRun p(&br_poly1305_ctmul_run), p32(&br_poly1305_ctmul32_run);
+        const double cp = Measure(p, buf), cp32 = Measure(p32, buf);
+
+        double aes = aesCt64;
+        if (aesBig > aes) {
+            aes = aesBig;
+            g_aesCtr = &br_aes_big_ctr_vtable;
+            g_aesCbcDec = &br_aes_big_cbcdec_vtable;
+            g_aesCbcEnc = &br_aes_big_cbcenc_vtable;
+        }
+        if (aesCt > aes) {
+            aes = aesCt;
+            g_aesCtr = &br_aes_ct_ctr_vtable;
+            g_aesCbcDec = &br_aes_ct_cbcdec_vtable;
+            g_aesCbcEnc = &br_aes_ct_cbcenc_vtable;
+        }
+        double ghash = gh64;
+        if (gh > ghash) {
+            ghash = gh;
+            g_ghash = &br_ghash_ctmul;
+        }
+        if (gh32 > ghash) {
+            ghash = gh32;
+            g_ghash = &br_ghash_ctmul32;
+        }
+        const double chapol = cp32 > cp ? cp32 : cp;
+        if (cp32 > cp)
+            g_poly1305 = &br_poly1305_ctmul32_run;
+
+        // AES-GCM is the two in turn over the same bytes.
+        const double gcm = (aes > 0 && ghash > 0) ? 1.0 / (1.0 / aes + 1.0 / ghash) : 0;
+        g_chachaFirst = chapol >= gcm;
+
+        char line[256];
+        _snprintf(line, sizeof(line),
+                  "[tls] one thread, MB/s: AES big %.1f, ct64 %.1f, ct %.1f; GHASH ctmul64 %.1f, ctmul %.1f, "
+                  "ctmul32 %.1f; ChaCha20-Poly1305 %.1f (ctmul32 %.1f) -> AES-GCM %.1f, ChaCha20 %.1f, %s first",
+                  aesBig, aesCt64, aesCt, gh64, gh, gh32, cp, cp32, gcm, chapol, g_chachaFirst ? "ChaCha20" : "AES-GCM");
+        line[sizeof(line) - 1] = '\0';
+        debug_tls(line);
+        free(buf);
+    }
+    g_tuneState = 2;
+}
+
 static void XboxTLS_UseFastDownloadSuites(br_ssl_client_context* sc) {
-    static const uint16_t suites[] = {
+    // Fastest first, as the measurement found - the server has the last
+    // word, but most take the client's order among the suites they share.
+    static const uint16_t chachaFirst[] = {
         BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
         BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
@@ -269,9 +415,44 @@ static void XboxTLS_UseFastDownloadSuites(br_ssl_client_context* sc) {
         BR_TLS_RSA_WITH_AES_128_GCM_SHA256,
         BR_TLS_RSA_WITH_AES_128_CBC_SHA
     };
+    static const uint16_t gcmFirst[] = {
+        BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        BR_TLS_RSA_WITH_AES_128_GCM_SHA256,
+        BR_TLS_RSA_WITH_AES_128_CBC_SHA
+    };
 
+    XboxTLS_Tune();
     br_ssl_engine_set_versions(&sc->eng, BR_TLS12, BR_TLS12);
-    br_ssl_engine_set_suites(&sc->eng, suites, sizeof(suites) / sizeof(suites[0]));
+    if (g_chachaFirst)
+        br_ssl_engine_set_suites(&sc->eng, chachaFirst, sizeof(chachaFirst) / sizeof(chachaFirst[0]));
+    else
+        br_ssl_engine_set_suites(&sc->eng, gcmFirst, sizeof(gcmFirst) / sizeof(gcmFirst[0]));
+
+    // The implementations the measurement chose, over br_ssl_client_init_full's.
+    br_ssl_engine_set_aes_ctr(&sc->eng, g_aesCtr);
+    br_ssl_engine_set_aes_cbc(&sc->eng, g_aesCbcEnc, g_aesCbcDec);
+    br_ssl_engine_set_ghash(&sc->eng, g_ghash);
+    br_ssl_engine_set_poly1305(&sc->eng, g_poly1305);
+}
+
+const char* XboxTLS_CipherName(XboxTLSContext* ctx) {
+    if (!ctx || !ctx->internal)
+        return "none";
+    XboxTLSInternal* ic = (XboxTLSInternal*)ctx->internal;
+    br_ssl_session_parameters params;
+    br_ssl_engine_get_session_parameters(&ic->sc.eng, &params);
+    switch (params.cipher_suite) {
+    case BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:
+    case BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: return "ChaCha20-Poly1305";
+    case BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
+    case BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+    case BR_TLS_RSA_WITH_AES_128_GCM_SHA256: return "AES-128-GCM";
+    case BR_TLS_RSA_WITH_AES_128_CBC_SHA: return "AES-128-CBC";
+    default: return "other";
+    }
 }
 
 

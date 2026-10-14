@@ -271,6 +271,10 @@ struct Shared
     bool writeFailed;
     char why[160];                    // the last connection failure
     char lastReply[96];               // the last answer to BODY that wasn't 222 or 430
+    bool cipherLogged;
+    unsigned long long msNetwork;     // every connection's time fetching - the network and TLS
+    unsigned long long msDecode;      // decoding yEnc and checking its CRC
+    unsigned long long msWrite;       // writing, waiting for the drive included
 };
 
 enum ArticleOutcome
@@ -430,9 +434,15 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
         EnterCriticalSection(&s->lock);
         s->connected++;
         s->everConnected++;
+        const bool sayCipher = !s->cipherLogged;
+        s->cipherLogged = true;
         LeaveCriticalSection(&s->lock);
+        if (sayCipher)
+            dprintf("[nntp] %s\n", c->ssl ? XboxTLS_CipherName(&c->tls) : "plain NNTP, no TLS");
 
+        // Where this connection's time goes, for the summary.
         unsigned long articles = 0;
+        DWORD msNetwork = 0, msDecode = 0, msWrite = 0;
         for (;;)
         {
             unsigned long index = 0;
@@ -459,6 +469,7 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
 
             bool got = false, gone = false, lost = false;
             unsigned long bodyLen = 0;
+            const DWORD fetchStart = GetTickCount();
             for (int attempt = 0; attempt < ARTICLE_TRIES && !got && !gone && !lost; ++attempt)
             {
                 if (!c->open && !Reconnect(s, c, slot))
@@ -491,41 +502,43 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                     continue;
                 }
 
-                // The body, dot-stuffing undone, up to its "." line.
+                // The body, dot-stuffing undone, up to its "." line - each
+                // line read straight into the body, not through a buffer of
+                // its own, as copying is a real share of the 360's time.
                 bodyLen = 0;
                 bool complete = false, failed = false;
                 for (;;)
                 {
-                    const int n = ReadLine(c, line, LINE_MAX_LEN);
+                    if (bodyCap - bodyLen < (unsigned long)LINE_MAX_LEN + 2)
+                    {
+                        unsigned long newCap = bodyCap * 2;
+                        char *bigger = (newCap <= BODY_MAX) ? (char *)realloc(body, newCap) : NULL;
+                        if (bigger == NULL)
+                        {
+                            failed = true; // reading on would desync the connection
+                            break;
+                        }
+                        body = bigger;
+                        bodyCap = newCap;
+                    }
+                    char *text = body + bodyLen;
+                    int n = ReadLine(c, text, LINE_MAX_LEN);
                     if (n < 0)
                     {
                         failed = true;
                         break;
                     }
-                    if (n == 1 && line[0] == '.')
+                    if (n == 1 && text[0] == '.')
                     {
                         complete = true;
                         break;
                     }
-                    const char *text = (n >= 2 && line[0] == '.' && line[1] == '.') ? line + 1 : line;
-                    const unsigned long textLen = (unsigned long)(n - (text - line));
-                    if (bodyLen + textLen + 1 > bodyCap)
+                    if (n >= 2 && text[0] == '.' && text[1] == '.')
                     {
-                        unsigned long newCap = bodyCap * 2;
-                        char *bigger = (newCap <= BODY_MAX) ? (char *)realloc(body, newCap) : NULL;
-                        if (bigger != NULL)
-                        {
-                            body = bigger;
-                            bodyCap = newCap;
-                        }
-                        else
-                        {
-                            failed = true; // keeps reading would desync the connection
-                            break;
-                        }
+                        memmove(text, text + 1, n - 1);
+                        n--;
                     }
-                    memcpy(body + bodyLen, text, textLen);
-                    bodyLen += textLen;
+                    bodyLen += n;
                     body[bodyLen++] = '\n';
                 }
                 if (complete)
@@ -543,12 +556,16 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                 break;
             }
 
+            const DWORD fetched = GetTickCount();
+            msNetwork += fetched - fetchStart;
             ArticleOutcome outcome = gone ? ARTICLE_GONE : ARTICLE_FAILED;
             if (got)
             {
                 YencPart part;
                 unsigned char *decoded = (unsigned char *)body; // in place - see YencDecode
                 const YencResult r = YencDecode(body, bodyLen, decoded, bodyCap, &part);
+                const DWORD decodedAt = GetTickCount();
+                msDecode += decodedAt - fetched;
                 if (r == YENC_OK || r == YENC_CRC_MISMATCH)
                 {
                     const int file = s->segmentFile[index];
@@ -570,6 +587,7 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
                         s->stop = true;
                         LeaveCriticalSection(&s->lock);
                     }
+                    msWrite += GetTickCount() - decodedAt;
                     outcome = (r == YENC_OK) ? ARTICLE_GOOD : ARTICLE_DAMAGED;
                 }
                 else
@@ -596,6 +614,9 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
         Close(c);
         EnterCriticalSection(&s->lock);
         s->connected--;
+        s->msNetwork += msNetwork;
+        s->msDecode += msDecode;
+        s->msWrite += msWrite;
         LeaveCriticalSection(&s->lock);
         dprintf("[nntp] connection %d done: %lu article(s)\n", slot + 1, articles);
     }
@@ -693,6 +714,8 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, boo
     s->writeFailed = false;
     s->why[0] = '\0';
     s->lastReply[0] = '\0';
+    s->cipherLogged = false;
+    s->msNetwork = s->msDecode = s->msWrite = 0;
     s->files = (FILE **)calloc(nzb->fileCount, sizeof(FILE *));
     s->left = (unsigned long *)calloc(nzb->fileCount, sizeof(unsigned long));
     s->segmentFile.assign(nzb->segmentCount, -1);
@@ -759,8 +782,10 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, boo
         // TLS decryption is most of a connection's work: around the cores,
         // away from the UI's hardware thread 0. Thread 3 is the installer's,
         // which only waits while this runs.
-        static const DWORD kProcessors[] = { 1, 4, 5, 2 };
-        XSetThreadProcessor(threads[i], kProcessors[i % 4]);
+        // Every hardware thread but the UI's 0 - 3 is the installer's,
+        // which only waits while this runs.
+        static const DWORD kProcessors[] = { 1, 2, 3, 4, 5 };
+        XSetThreadProcessor(threads[i], kProcessors[i % 5]);
 #endif
         ResumeThread(threads[i]);
         started++;
@@ -806,6 +831,11 @@ NntpResult NntpDownload(const NntpServer &server, Nzb *nzb, const char *dir, boo
             unfinished ? ", unfinished" : "");
     if (s->lastReply[0] != '\0')
         dprintf("[nntp] the last answer that wasn't an article: %s\n", s->lastReply);
+    const unsigned long long busy = s->msNetwork + s->msDecode + s->msWrite;
+    if (busy > 0)
+        dprintf("[nntp] the connections' time: fetching (network and TLS) %I64u pc, decoding %I64u pc, "
+                "writing %I64u pc\n",
+                s->msNetwork * 100 / busy, s->msDecode * 100 / busy, s->msWrite * 100 / busy);
 
     NntpResult result = NNTP_OK;
     if (cancelled)
