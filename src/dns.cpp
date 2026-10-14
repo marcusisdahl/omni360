@@ -103,6 +103,17 @@ bool ResolveDNS(const char *domain, char *resolvedIP, int ipBufferSize)
 
     resolvedIP[0] = '\0';
 
+    // An address already - Prowlarr's on the local network, typed as
+    // 10.10.4.58 - is its own answer. XNetDnsLookup would send it to the DNS
+    // server as a name, which knows nothing of it, and the connection would
+    // fail before it was tried.
+    if (inet_addr(domain) != INADDR_NONE)
+    {
+        _snprintf(resolvedIP, ipBufferSize, "%s", domain);
+        resolvedIP[ipBufferSize - 1] = '\0';
+        return true;
+    }
+
     if (KnownMissing(domain))
         return false;
 
