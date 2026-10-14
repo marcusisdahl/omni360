@@ -4006,7 +4006,11 @@ static void DrawCheckQuads(float x, float cy, bool on, bool dim)
 // The value control's marks: where the value sits among them.
 static void DrawValueQuads(const SettingsControlView &c, float x, float cy)
 {
-    const float mid = x + SettingsControlWidth(c) * 0.5f, w = S(14.0f), step = S(18.0f);
+    // Narrower and closer together when there are many, so they stay
+    // between the arrows - sixteen connections as well as four speeds.
+    const float room = SettingsControlWidth(c) - S(60.0f);
+    const float step = (c.valueCount * S(18.0f) > room && c.valueCount > 0) ? room / c.valueCount : S(18.0f);
+    const float mid = x + SettingsControlWidth(c) * 0.5f, w = step * (14.0f / 18.0f);
     const float left = mid - (c.valueCount * step - (step - w)) * 0.5f;
     for (int d = 0; d < c.valueCount; ++d)
         FillRound(left + d * step, cy + S(11.0f), w, S(4.0f), S(2.0f), d == c.valueIndex ? COL_GREEN : COL_TRACK);

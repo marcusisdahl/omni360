@@ -1312,9 +1312,14 @@ enum SettingsRow
     // Usenet (Usenet.h): each typed, or toggled, into settings.txt
     SETTINGS_ROW_PROWLARR_ADDRESS,
     SETTINGS_ROW_PROWLARR_KEY,
+    SETTINGS_ROW_PROWLARR_REMOVE_KEY,
     SETTINGS_ROW_PROWLARR_TEST,       // asks Prowlarr for its indexers
-    SETTINGS_ROW_USENET_SERVER,       // the provider's host, and port if typed
-    SETTINGS_ROW_USENET_LOGIN,        // user name, then password
+    SETTINGS_ROW_USENET_CATEGORIES,
+    SETTINGS_ROW_USENET_SERVER,       // the provider's host, and port if typed with it
+    SETTINGS_ROW_USENET_PORT,
+    SETTINGS_ROW_USENET_USER,
+    SETTINGS_ROW_USENET_PASSWORD,
+    SETTINGS_ROW_USENET_REMOVE_PASSWORD,
     SETTINGS_ROW_USENET_TLS,
     SETTINGS_ROW_USENET_CONNECTIONS,  // a value: left and right change it
     SETTINGS_ROW_USENET_TEST          // logs in once
@@ -1645,7 +1650,7 @@ static void RemoveKeys(SettingsOutcome &outcome)
 // folders under a heading with Add folder and Change install folder, then
 // one line a setting. Rebuilt whenever something may have changed it, rather
 // than every frame - each rebuild reads the keys file.
-#define MAX_SETTINGS_ROWS (12 + MAX_FOLDER_ROWS)
+#define MAX_SETTINGS_ROWS (20 + MAX_FOLDER_ROWS)
 #define SETTINGS_MIDDOT "  \xC2\xB7  "
 
 struct SettingsPage
@@ -1661,8 +1666,12 @@ struct SettingsPage
     char keysStatus[64];
     char updatesStatus[96];
     char updatesHelp[96];
-    char prowlarrStatus[160];
-    char serverStatus[160];
+    char prowlarrUrlStatus[256];
+    char prowlarrKeyStatus[32];
+    char categoriesStatus[96];
+    char serverStatus[256];
+    char portStatus[8];
+    char userStatus[128];
     char connectionsValue[8];
 
     int focusRow;
@@ -1844,56 +1853,91 @@ static void BuildSettingsPage(SettingsPage &page, const Library &lib, const char
     page.rows[page.count - 1].controls[0].on = UiSoundsSetting();
 
     // --- Usenet: Prowlarr to search, a provider to download from ---
-    // Keys show only their first characters, and the password never.
+    // One row a setting, as the rest of the page: what it's set to, and A to
+    // change it. Keys show only their first characters, the password never.
     UsenetConfig usenet;
     LoadUsenetConfig(&usenet);
-    AddSettingsRow(page, SETTINGS_VIEW_HEADING, "Usenet");
 
-    if (usenet.prowlarrUrl[0] == '\0')
-        _snprintf(page.prowlarrStatus, sizeof(page.prowlarrStatus), "Not set" SETTINGS_MIDDOT "searches from the Store");
-    else
+    AddSettingsRow(page, SETTINGS_VIEW_HEADING, "Prowlarr");
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Test connection", SETTINGS_ROW_PROWLARR_TEST,
+                       "Asks Prowlarr for its indexers - and says how many Usenet ones are on.");
+
+    _snprintf(page.prowlarrUrlStatus, sizeof(page.prowlarrUrlStatus), "%s",
+              usenet.prowlarrUrl[0] != '\0' ? usenet.prowlarrUrl : "Not set");
+    page.prowlarrUrlStatus[sizeof(page.prowlarrUrlStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Address").status = page.prowlarrUrlStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Change", SETTINGS_ROW_PROWLARR_ADDRESS,
+                       "Where Prowlarr is, like 192.168.1.10 - its port, 9696, is added if you leave it out.");
+
+    if (usenet.prowlarrKey[0] != '\0')
     {
         char shown[5] = "";
         strncpy(shown, usenet.prowlarrKey, 4);
         shown[4] = '\0';
-        _snprintf(page.prowlarrStatus, sizeof(page.prowlarrStatus), "%s" SETTINGS_MIDDOT "%s%s%s", usenet.prowlarrUrl,
-                  shown[0] != '\0' ? "key " : "no API key", shown, shown[0] != '\0' ? "\xE2\x80\xA6" : "");
+        _snprintf(page.prowlarrKeyStatus, sizeof(page.prowlarrKeyStatus), "Saved" SETTINGS_MIDDOT "%s\xE2\x80\xA6", shown);
     }
-    page.prowlarrStatus[sizeof(page.prowlarrStatus) - 1] = '\0';
-    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Prowlarr").status = page.prowlarrStatus;
-    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Address", SETTINGS_ROW_PROWLARR_ADDRESS,
-                       "Where Prowlarr is, like 192.168.1.10 - its port, 9696, is added if you leave it out.");
-    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "API key", SETTINGS_ROW_PROWLARR_KEY,
-                       "From Prowlarr's Settings > General > Security.");
-    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Test", SETTINGS_ROW_PROWLARR_TEST,
-                       "Asks Prowlarr for its indexers - and says how many Usenet ones are on.");
-
-    if (usenet.server.host[0] == '\0')
-        _snprintf(page.serverStatus, sizeof(page.serverStatus), "Not set" SETTINGS_MIDDOT "your Usenet provider");
     else
-        _snprintf(page.serverStatus, sizeof(page.serverStatus), "%s:%u" SETTINGS_MIDDOT "%s", usenet.server.host,
-                  (unsigned)usenet.server.port, usenet.server.user[0] != '\0' ? usenet.server.user : "no login");
-    page.serverStatus[sizeof(page.serverStatus) - 1] = '\0';
-    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Usenet server").status = page.serverStatus;
-    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Server", SETTINGS_ROW_USENET_SERVER,
-                       "Your provider's news server, like news.example.com - add :port for one that isn't the usual.");
-    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Login", SETTINGS_ROW_USENET_LOGIN,
-                       "Your provider's user name, then password. The keyboard shows what's typed.");
-    AddSettingsControl(page, SETTINGS_CONTROL_CHECK, "TLS", SETTINGS_ROW_USENET_TLS,
-                       "Encrypted, on port 563. Off is plain NNTP on 119: lighter on the 360, but the login isn't hidden.");
-    page.rows[page.count - 1].controls[2].on = usenet.server.ssl;
+        _snprintf(page.prowlarrKeyStatus, sizeof(page.prowlarrKeyStatus), "Not set");
+    page.prowlarrKeyStatus[sizeof(page.prowlarrKeyStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "API key").status = page.prowlarrKeyStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, usenet.prowlarrKey[0] != '\0' ? "Change" : "Add",
+                       SETTINGS_ROW_PROWLARR_KEY, "From Prowlarr: Settings > General > Security > API Key.");
+    if (usenet.prowlarrKey[0] != '\0')
+        AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Remove", SETTINGS_ROW_PROWLARR_REMOVE_KEY,
+                           "Deletes the saved key from this console.");
 
+    _snprintf(page.categoriesStatus, sizeof(page.categoriesStatus), "%s",
+              usenet.categories[0] != '\0' ? usenet.categories : "All");
+    page.categoriesStatus[sizeof(page.categoriesStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Categories").status = page.categoriesStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Change", SETTINGS_ROW_USENET_CATEGORIES,
+                       "Newznab category numbers to search, like 1000,1050 - or nothing, for every category.");
+
+    AddSettingsRow(page, SETTINGS_VIEW_HEADING, "Usenet server");
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Test login", SETTINGS_ROW_USENET_TEST,
+                       "Connects to your provider and logs in, once.");
+
+    _snprintf(page.serverStatus, sizeof(page.serverStatus), "%s",
+              usenet.server.host[0] != '\0' ? usenet.server.host : "Not set");
+    page.serverStatus[sizeof(page.serverStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Server").status = page.serverStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Change", SETTINGS_ROW_USENET_SERVER,
+                       "Your provider's news server, like news.example.com.");
+
+    _snprintf(page.portStatus, sizeof(page.portStatus), "%u", (unsigned)usenet.server.port);
+    page.portStatus[sizeof(page.portStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Port").status = page.portStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Change", SETTINGS_ROW_USENET_PORT,
+                       "563 for encrypted connections, 119 for plain ones - unless your provider says otherwise.");
+
+    _snprintf(page.userStatus, sizeof(page.userStatus), "%s",
+              usenet.server.user[0] != '\0' ? usenet.server.user : "Not set");
+    page.userStatus[sizeof(page.userStatus) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "User name").status = page.userStatus;
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Change", SETTINGS_ROW_USENET_USER,
+                       "Your provider's user name.");
+
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Password").status =
+        usenet.server.pass[0] != '\0' ? "Saved" : "Not set";
+    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, usenet.server.pass[0] != '\0' ? "Change" : "Add",
+                       SETTINGS_ROW_USENET_PASSWORD, "Your provider's password. The keyboard shows it as it's typed.");
+    if (usenet.server.pass[0] != '\0')
+        AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Remove", SETTINGS_ROW_USENET_REMOVE_PASSWORD,
+                           "Deletes the saved password from this console.");
+
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "Encrypted (TLS)");
+    AddSettingsControl(page, SETTINGS_CONTROL_CHECK, NULL, SETTINGS_ROW_USENET_TLS,
+                       "On: port 563, the login hidden. Off: plain NNTP on 119 - lighter on the 360's CPU.");
+    page.rows[page.count - 1].controls[0].on = usenet.server.ssl;
+
+    // How many connections a download uses: left and right change it.
     _snprintf(page.connectionsValue, sizeof(page.connectionsValue), "%d", usenet.server.connections);
     page.connectionsValue[sizeof(page.connectionsValue) - 1] = '\0';
-    // Test first: left and right on a value change it, so a button after it
-    // could never be reached.
     AddSettingsRow(page, SETTINGS_VIEW_LINE, "Connections");
-    AddSettingsControl(page, SETTINGS_CONTROL_BUTTON, "Test", SETTINGS_ROW_USENET_TEST,
-                       "Connects to the server and logs in, once.");
     AddSettingsControl(page, SETTINGS_CONTROL_VALUE, page.connectionsValue, SETTINGS_ROW_USENET_CONNECTIONS,
-                       "How many downloads at once - left and right change it. Stay within your plan's limit.");
+                       "How many articles download at once - left and right change it. Stay within your plan's limit.");
     {
-        SettingsControlView &c = page.rows[page.count - 1].controls[1];
+        SettingsControlView &c = page.rows[page.count - 1].controls[0];
         c.valueIndex = usenet.server.connections - 1;
         c.valueCount = NNTP_MAX_CONNECTIONS;
     }
@@ -2016,18 +2060,66 @@ static void ChangeUsenetServer()
     SaveSetting(USENET_HOST_KEY, typed.c_str());
 }
 
-static void ChangeUsenetLogin()
+static void ChangeUsenetPort()
 {
     UsenetConfig config;
     LoadUsenetConfig(&config);
-    std::string user, pass;
-    if (!TypeSetting(L"Usenet user name", L"Your provider's user name", config.server.user, user))
+    char current[8];
+    _snprintf(current, sizeof(current), "%u", (unsigned)config.server.port);
+    current[sizeof(current) - 1] = '\0';
+    std::string typed;
+    if (!TypeSetting(L"Usenet port", L"563 for encrypted connections, 119 for plain ones", current, typed) ||
+        typed.empty())
         return;
-    // The password starts empty rather than showing the saved one.
-    if (!TypeSetting(L"Usenet password", L"Your provider's password - shown as it's typed", "", pass) || pass.empty())
+    const int port = atoi(typed.c_str());
+    if (typed.find_first_not_of("0123456789") != std::string::npos || port <= 0 || port > 65535)
+    {
+        ShowMessageUI("Not a port", "A port is a number from 1 to 65535.", typed.c_str());
         return;
-    SaveSetting(USENET_USER_KEY, user.c_str());
-    SaveSetting(USENET_PASS_KEY, pass.c_str());
+    }
+    char value[8];
+    _snprintf(value, sizeof(value), "%d", port);
+    value[sizeof(value) - 1] = '\0';
+    SaveSetting(USENET_PORT_KEY, value);
+}
+
+static void ChangeUsenetUser()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    std::string user;
+    if (TypeSetting(L"Usenet user name", L"Your provider's user name", config.server.user, user))
+        SaveSetting(USENET_USER_KEY, user.c_str());
+}
+
+static void ChangeUsenetPassword()
+{
+    // Starts empty rather than showing the saved one.
+    std::string pass;
+    if (TypeSetting(L"Usenet password", L"Your provider's password - shown as it's typed", "", pass) && !pass.empty())
+        SaveSetting(USENET_PASS_KEY, pass.c_str());
+}
+
+static void ChangeUsenetCategories()
+{
+    UsenetConfig config;
+    LoadUsenetConfig(&config);
+    std::string typed;
+    if (!TypeSetting(L"Categories to search", L"Newznab category numbers, like 1000,1050 - empty for all",
+                     config.categories, typed))
+        return;
+    if (typed.find_first_not_of("0123456789, ") != std::string::npos)
+    {
+        ShowMessageUI("Not saved", "Categories are numbers, separated by commas.", typed.c_str());
+        return;
+    }
+    SaveSetting("usenet-categories: ", typed.c_str());
+}
+
+static void RemoveUsenetSecret(const char *key, const char *what)
+{
+    if (ShowConfirmUI("Remove it?", what, "It's deleted from settings.txt on this console.", "Remove"))
+        SaveSetting(key, "");
 }
 
 static void ToggleUsenetTls()
@@ -2089,8 +2181,13 @@ static SettingsOutcome RunSettingsRow(SettingsRow row, int arg, Library &lib, ch
     case SETTINGS_ROW_PROWLARR_ADDRESS: ChangeProwlarrAddress(); break;
     case SETTINGS_ROW_PROWLARR_KEY:     ChangeProwlarrKey(); break;
     case SETTINGS_ROW_PROWLARR_TEST:    TestProwlarr(); break;
+    case SETTINGS_ROW_PROWLARR_REMOVE_KEY: RemoveUsenetSecret(PROWLARR_KEY_KEY, "Prowlarr's API key"); break;
+    case SETTINGS_ROW_USENET_CATEGORIES: ChangeUsenetCategories(); break;
     case SETTINGS_ROW_USENET_SERVER:    ChangeUsenetServer(); break;
-    case SETTINGS_ROW_USENET_LOGIN:     ChangeUsenetLogin(); break;
+    case SETTINGS_ROW_USENET_PORT:      ChangeUsenetPort(); break;
+    case SETTINGS_ROW_USENET_USER:      ChangeUsenetUser(); break;
+    case SETTINGS_ROW_USENET_PASSWORD:  ChangeUsenetPassword(); break;
+    case SETTINGS_ROW_USENET_REMOVE_PASSWORD: RemoveUsenetSecret(USENET_PASS_KEY, "Your Usenet password"); break;
     case SETTINGS_ROW_USENET_TLS:       ToggleUsenetTls(); break;
     case SETTINGS_ROW_USENET_TEST:      TestUsenetLogin(); break;
     default:                        break; // SETTINGS_ROW_USENET_CONNECTIONS: left and right, not A

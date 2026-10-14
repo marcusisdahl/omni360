@@ -88,11 +88,10 @@ The Store's **Usenet** button searches your own [Prowlarr](https://prowlarr.com/
 - **Prowlarr**, running on a PC or NAS the console can reach, with your indexers added to it. Its API key is in Prowlarr under **Settings → General**.
 - **A Usenet provider account**: its server name, your user name and password, and how many connections your plan allows.
 
-**On the console**, it's all in **Settings → Usenet**:
+**On the console**, it's all in **Settings**, under two headings, one setting a row like the rest of the page — **A** on **Change** types a new value:
 
-- **Prowlarr** — **Address** is the IP of the PC or NAS it runs on, like `192.168.1.10`; its port, 9696, is added for you (type a full URL, like `http://192.168.1.10:9696/prowlarr`, if yours is different). **API key** is in Prowlarr under **Settings → General → Security**. **Test** asks Prowlarr for its indexers and says how many Usenet ones are on.
-- **Usenet server** — **Server** is your provider's news server, like `news.example.com` (add `:port` for an unusual one). **Login** asks for your user name, then your password. **TLS** is on by default.
-- **Connections** — **Test** logs in to the server once; left and right on the number change how many connections a download uses.
+- **Prowlarr** — **Address** is the IP of the PC or NAS it runs on, like `192.168.1.10`; its port, 9696, is added for you (type a full URL, like `http://192.168.1.10:9696/prowlarr`, if yours is different). **API key** is in Prowlarr under **Settings → General → Security**. **Categories** narrows searches to Newznab category numbers; empty searches them all. **Test connection**, on the heading, asks Prowlarr for its indexers and says how many Usenet ones are on.
+- **Usenet server** — **Server** is your provider's news server, like `news.example.com`; **Port**, **User name** and **Password** are its others. **Encrypted (TLS)** is on by default; turning it off moves the port from 563 to 119. **Connections**: left and right change how many a download uses. **Test login**, on the heading, logs in once.
 
 Prowlarr has to be reachable from the console: use the PC's IP address rather than its name, and allow port 9696 through its firewall. Prowlarr listens on every network by default.
 
