@@ -1230,10 +1230,26 @@ static void RunJob(GameJob *job, const char *gamesPath)
     }
     std::string url = std::string("https://archive.org/download/") + req.item + "/" + encodedZip;
 
-    // The datanode, once, so every request after goes straight there.
+    // The datanode, once, so every request after goes straight there. A few
+    // tries, each from archive.org itself: a datanode answers 500 or 503 now
+    // and then, and the next redirect may well be to another - one bad
+    // answer used to end the install before it began.
     char small[4096];
     unsigned long long len = 0;
-    int status = Get(url, auth, "Range: bytes=0-1023\r\n", small, sizeof(small) - 1, &len);
+    const std::string start = url;
+    int status = 0;
+    for (int attempt = 0; attempt < 4 && !Cancelled(job); ++attempt)
+    {
+        if (attempt > 0)
+        {
+            dprintf("[game] the first request: HTTP %d - trying again (%d of 4)\n", status, attempt + 1);
+            Sleep(2000 * attempt);
+        }
+        url = start;
+        status = Get(url, auth, "Range: bytes=0-1023\r\n", small, sizeof(small) - 1, &len);
+        if (status == 206 || status == 401 || status == 403 || status == 404)
+            break;
+    }
     if (status == 401 || status == 403)
     {
         FinishLocked(job, QUEUE_OUTCOME_KEYS_REJECTED, "Keys not accepted",
