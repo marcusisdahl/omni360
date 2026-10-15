@@ -49,8 +49,8 @@ void debug_hex(const char* label, const unsigned char* buf, int len)
 
 #ifdef _XBOX
 // Straight to the file, not through dprintf: the thread is crashing, and
-// dprintf draws to the screen and formats twice. Opened and closed for each
-// line, so what's written is on the drive even if nothing after it runs.
+// dprintf draws to the screen and formats twice. Flushed to the drive before
+// it returns, so what's written is there even if nothing after it runs.
 static void CrashLine(const char *format, ...)
 {
     char line[256];
@@ -59,13 +59,7 @@ static void CrashLine(const char *format, ...)
     _vsnprintf(line, sizeof(line), format, args);
     va_end(args);
     line[sizeof(line) - 1] = '\0';
-
-    FILE *f = fopen(LOG_FILE_PATH, "a");
-    if (f != NULL)
-    {
-        fputs(line, f);
-        fclose(f);
-    }
+    LogAppendDurable(line);
 }
 
 LONG LogCrash(const char *where, EXCEPTION_POINTERS *info)

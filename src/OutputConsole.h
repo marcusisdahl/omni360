@@ -43,6 +43,11 @@ void __cdecl dprintf(const char *strFormat, ...);
 
 	void __cdecl log_printf(const char *strFormat, ...);
 
+	// A line straight to DebugInfo.txt, flushed to the drive before it
+	// returns - for what must be there even if the console then freezes.
+	// (Every line reaches the drive within half a second anyway.)
+	void LogAppendDurable(const char *text);
+
 #ifdef __cplusplus
 }
 #endif

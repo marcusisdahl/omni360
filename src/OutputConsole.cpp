@@ -34,6 +34,76 @@ void SetConsoleQuiet(int quiet)
 	g_consoleQuiet = (quiet != 0);
 }
 
+// ---------------------------------------------------------------------------
+// The log file, so it survives a hard freeze
+// ---------------------------------------------------------------------------
+//
+// Lines used to be written with fopen/fprintf/fclose each, which hands them to
+// the file system's cache - and a console that freezes hard and is switched
+// off never writes that cache out, so DebugInfo.txt came back empty, the one
+// time it mattered most. Now the file is kept open, each line is written to it
+// as it comes, and it's flushed to the drive at least twice a second: by the
+// next line when the last flush was 500ms ago, or by a small thread when
+// lines are waiting and nothing else has come. A freeze loses half a second.
+
+#define LOG_FLUSH_MS 500
+
+static HANDLE g_logFile = INVALID_HANDLE_VALUE;
+static DWORD g_logFlushed = 0;
+static bool g_logDirty = false;
+
+static DWORD WINAPI LogFlusherEntry(LPVOID)
+{
+	for (;;)
+	{
+		Sleep(LOG_FLUSH_MS);
+		EnterCriticalSection(&g_logLock.cs);
+		if (g_logDirty && g_logFile != INVALID_HANDLE_VALUE)
+		{
+			FlushFileBuffers(g_logFile);
+			g_logFlushed = GetTickCount();
+			g_logDirty = false;
+		}
+		LeaveCriticalSection(&g_logLock.cs);
+	}
+}
+
+// Under g_logLock.
+static void AppendLogLocked(const char* text, bool flushNow)
+{
+	if (g_logFile == INVALID_HANDLE_VALUE)
+	{
+		g_logFile = CreateFileA(LOG_FILE_PATH, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+		                        FILE_ATTRIBUTE_NORMAL, NULL);
+		if (g_logFile == INVALID_HANDLE_VALUE)
+		{
+			printf("Failed to open log file\n");
+			return;
+		}
+		SetFilePointer(g_logFile, 0, NULL, FILE_END);
+		HANDLE flusher = CreateThread(NULL, 16 * 1024, LogFlusherEntry, NULL, 0, NULL);
+		if (flusher != NULL)
+			CloseHandle(flusher);
+	}
+	DWORD written = 0;
+	WriteFile(g_logFile, text, (DWORD)strlen(text), &written, NULL);
+	g_logDirty = true;
+	const DWORD now = GetTickCount();
+	if (flushNow || now - g_logFlushed >= LOG_FLUSH_MS)
+	{
+		FlushFileBuffers(g_logFile);
+		g_logFlushed = now;
+		g_logDirty = false;
+	}
+}
+
+void LogAppendDurable(const char* text)
+{
+	EnterCriticalSection(&g_logLock.cs);
+	AppendLogLocked(text, true);
+	LeaveCriticalSection(&g_logLock.cs);
+}
+
 #ifdef USE_UNICODE
 WCHAR buf[TEXTBUFFER_SIZE]; // Text buffer
 void  __cdecl dprintf(const wchar_t* strFormat, ...)
@@ -96,14 +166,7 @@ void  __cdecl dprintf(const char* strFormat, ...)
 	// Note this does NOT apply to log_printf below, which has no Display call
 	// at all: its printf is that function's only console output and must stay.
 
-	FILE* fp = NULL;
-    errno_t err = fopen_s(&fp, LOG_FILE_PATH, "a+");
-    if(fp) {
-        fprintf(fp, "%s", buf);
-        fclose(fp);
-    } else {
-		printf("Failed to open log file\n");
-	}
+	AppendLogLocked(buf, false);
 
 #endif
 	LeaveCriticalSection(&g_logLock.cs);
@@ -132,13 +195,7 @@ void __cdecl log_printf(const char* strFormat, ...) {
 	va_end(pArglist);
 
 	printf("%s", buf);
-	
-	FILE* fp = NULL;
-    errno_t err = fopen_s(&fp, LOG_FILE_PATH, "a+");
-    if(fp) {
-        fprintf(fp, "%s", buf);
-        fclose(fp);
-    }
+	AppendLogLocked(buf, false);
 
 	LeaveCriticalSection(&g_logLock.cs);
 }

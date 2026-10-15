@@ -841,6 +841,8 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
             d->tooSlow[slot] = false;
             LeaveCriticalSection(&g_lock);
 
+            if (attempt == 0)
+                dprintf("[game] piece %lu on connection %d: starting\n", index, slot + 1);
             const char *target = (resumeFrom > 0) ? restPath : tempPath;
             unsigned long long size = 0;
             status = httpRequestHTTPS(url, HTTP_GET, NULL, headers, target, NULL, &size, true, NULL, 0,
@@ -1074,6 +1076,7 @@ static int RankServers(GameJob *job, const std::string &redirected, const char *
     {
         std::string u = candidates[i];
         unsigned long long len = 0;
+        dprintf("[game] measuring %s\n", HostOf(candidates[i]).c_str());
         DWORD started = GetTickCount();
         int status = Get(u, auth, range, buffer, PROBE + 4095, &len);
         DWORD ms = GetTickCount() - started;
@@ -1424,6 +1427,11 @@ static void RunJob(GameJob *job, const char *gamesPath)
     const DWORD downloadStart = GetTickCount();
     bool indexOk = (started > 0);
 
+    // The speed every two seconds, for the log - what was coming in just
+    // before anything went wrong.
+    DWORD beatAt = downloadStart;
+    unsigned long long beatBytes = 0;
+
     for (unsigned long index = 0; indexOk && index < d.pieceCount; ++index)
     {
         // Wait for this piece, reporting progress meanwhile.
@@ -1437,8 +1445,16 @@ static void RunJob(GameJob *job, const char *gamesPath)
                 bytes += d.inFlight[i];
             LeaveCriticalSection(&g_lock);
 
-            DWORD ms = GetTickCount() - downloadStart;
+            const DWORD now = GetTickCount();
+            DWORD ms = now - downloadStart;
             SetPhase(job, "Downloading", bytes, needed, ms > 3000 ? bytes * 1000 / ms : 0);
+            if (now - beatAt >= 2000)
+            {
+                dprintf("[game] %I64u MB in, %.2f MB/s over the last %.1fs\n", bytes / 1048576,
+                        (bytes - beatBytes) / 1048576.0 / ((now - beatAt) / 1000.0), (now - beatAt) / 1000.0);
+                beatAt = now;
+                beatBytes = bytes;
+            }
 
             if (ready || stop)
             {
