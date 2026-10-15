@@ -90,6 +90,72 @@ static void NoteMissing(const char *domain)
     LeaveCriticalSection(MissingLock());
 }
 
+// The answers, kept for five minutes. A download asks for the same server
+// for every piece on every connection, and the retries ask again - a dozen
+// connections were sending the console's DNS server a lookup a second, just
+// when it was struggling to answer at all. And if a lookup fails, the last
+// good address is better than none: the server rarely moved.
+#define MAX_ANSWERS     48
+#define ANSWER_FRESH_MS (5UL * 60 * 1000)
+
+struct DnsAnswer
+{
+    char name[128];
+    char ip[64];
+    DWORD at;
+};
+
+static DnsAnswer g_answers[MAX_ANSWERS];
+static int g_answerCount = 0;
+
+// The kept address for domain, fresh or - with anyAge - however old. Under
+// the same lock as the missing names.
+static bool CachedAnswer(const char *domain, char *ip, int ipSize, bool anyAge)
+{
+    bool found = false;
+    EnterCriticalSection(MissingLock());
+    for (int i = 0; i < g_answerCount && !found; ++i)
+    {
+        if (_stricmp(g_answers[i].name, domain) == 0 && (anyAge || GetTickCount() - g_answers[i].at < ANSWER_FRESH_MS))
+        {
+            _snprintf(ip, ipSize, "%s", g_answers[i].ip);
+            ip[ipSize - 1] = '\0';
+            found = true;
+        }
+    }
+    LeaveCriticalSection(MissingLock());
+    return found;
+}
+
+static void NoteAnswer(const char *domain, const char *ip)
+{
+    if (strlen(domain) >= sizeof(g_answers[0].name) || strlen(ip) >= sizeof(g_answers[0].ip))
+        return;
+    EnterCriticalSection(MissingLock());
+    int slot = 0;
+    while (slot < g_answerCount && _stricmp(g_answers[slot].name, domain) != 0)
+        slot++;
+    if (slot == g_answerCount)
+    {
+        if (g_answerCount < MAX_ANSWERS)
+            g_answerCount++;
+        else
+        {
+            // Full: the oldest makes way.
+            slot = 0;
+            for (int i = 1; i < MAX_ANSWERS; ++i)
+            {
+                if (GetTickCount() - g_answers[i].at > GetTickCount() - g_answers[slot].at)
+                    slot = i;
+            }
+        }
+    }
+    strcpy(g_answers[slot].name, domain);
+    strcpy(g_answers[slot].ip, ip);
+    g_answers[slot].at = GetTickCount();
+    LeaveCriticalSection(MissingLock());
+}
+
 bool ResolveDNS(const char *domain, char *resolvedIP, int ipBufferSize)
 {
     XNDNS *pxndns = NULL;
@@ -116,6 +182,8 @@ bool ResolveDNS(const char *domain, char *resolvedIP, int ipBufferSize)
 
     if (KnownMissing(domain))
         return false;
+    if (CachedAnswer(domain, resolvedIP, ipBufferSize, false))
+        return true;
 
     // XNetDnsLookup or the returned XNDNS block can fault if the network stack
     // is not ready yet, so keep the whole interaction guarded and fail cleanly.
@@ -186,6 +254,13 @@ bool ResolveDNS(const char *domain, char *resolvedIP, int ipBufferSize)
 
     if (missing)
         NoteMissing(domain);
+    else if (success)
+        NoteAnswer(domain, resolvedIP);
+    else if (CachedAnswer(domain, resolvedIP, ipBufferSize, true))
+    {
+        dprintf("[dns] %s: using its address from before, %s\n", domain, resolvedIP);
+        success = true;
+    }
     return success;
 }
 
