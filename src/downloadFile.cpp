@@ -378,6 +378,33 @@ bool endsWith(const std::string &fullString,
                               ending.size(), ending) == 0;
 }
 
+// The network and file buffers' size for the calling thread - see
+// SetThreadDownloadBuffers. A thread-local slot, as XboxTLS keeps its
+// per-thread settings.
+#define DEFAULT_DOWNLOAD_BUFFER (4UL * 1024 * 1024)
+static volatile LONG g_bufferSlot = (LONG)TLS_OUT_OF_INDEXES;
+
+void SetThreadDownloadBuffers(unsigned long bytes)
+{
+    if (g_bufferSlot == (LONG)TLS_OUT_OF_INDEXES)
+    {
+        DWORD slot = TlsAlloc();
+        if (slot == TLS_OUT_OF_INDEXES)
+            return;
+        if (InterlockedCompareExchange(&g_bufferSlot, (LONG)slot, (LONG)TLS_OUT_OF_INDEXES) != (LONG)TLS_OUT_OF_INDEXES)
+            TlsFree(slot);
+    }
+    TlsSetValue((DWORD)g_bufferSlot, (LPVOID)(ULONG_PTR)bytes);
+}
+
+static unsigned long DownloadBufferForThisThread()
+{
+    if (g_bufferSlot == (LONG)TLS_OUT_OF_INDEXES)
+        return DEFAULT_DOWNLOAD_BUFFER;
+    const unsigned long bytes = (unsigned long)(ULONG_PTR)TlsGetValue((DWORD)g_bufferSlot);
+    return bytes >= 64 * 1024 ? bytes : DEFAULT_DOWNLOAD_BUFFER;
+}
+
 int DumpResponse(XboxTLSContext *ctx,
                  const std::string filename,
                  char *outputBuffer,
@@ -400,7 +427,7 @@ int DumpResponse(XboxTLSContext *ctx,
 
     outputBufferPointer = 0; // Whether writing to a buffer or not, it doesn't hurt to clear this
 
-    const unsigned long long BUFFER_SIZE = 4 * 1024 * 1024;
+    const unsigned long long BUFFER_SIZE = DownloadBufferForThisThread();
     const unsigned long long MAX_FILE_SIZE = 0xF0000000;
 
     char *buffer = (char *)malloc(BUFFER_SIZE);

@@ -13,8 +13,11 @@
 // disc's file system out of order, so a game is installed in two halves:
 //
 //   1. The zip is downloaded into a staging folder on the games drive, in
-//      32MB pieces, two at a time - one connection runs at about 2.7 MB/s,
-//      two at about 5, and more don't add anything. As the pieces land in
+//      32MB pieces, several at a time (archive-connections:, 4 unless
+//      Settings says otherwise, up to 12) - archive.org holds one connection
+//      to about 2.7 MB/s. More used to add nothing, when the TLS code was the
+//      slowest kind; XboxTLS now measures which is fastest on the 360, and
+//      each connection takes about 3MB rather than 12. As the pieces land in
 //      order, the image is decompressed once to index it (InflateSource.h)
 //      and to check its CRC.
 //   2. The converter reads the image out of the downloaded zip through that

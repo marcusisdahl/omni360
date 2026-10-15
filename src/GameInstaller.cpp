@@ -37,8 +37,10 @@ DESCRIPTION : Downloads a Redump game's zip from archive.org and installs it as
 #include <ctype.h>
 
 #define PIECE_SIZE        (32ULL * 1024 * 1024)
-#define CONNECTIONS       2
-#define CONNECTION_STAGGER_MS 1500 // four opened at the same instant all stalled once
+#define MAX_CONNECTIONS   12 // archive-connections: in settings.txt, 1 to this
+#define DEFAULT_CONNECTIONS 4
+#define CONNECTION_STAGGER_MS 750 // four opened at the same instant all stalled once
+#define CONNECTION_BUFFER (1UL * 1024 * 1024) // each connection's network, file and socket buffers
 #define PIECE_ATTEMPTS    6 // slow drops use them up too
 #define STAGING_FOLDER    "Omni360Staging"
 #define SPACE_MARGIN      (64ULL * 1024 * 1024)
@@ -542,7 +544,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Downloading, two pieces at a time
+// Downloading, several pieces at a time
 // ---------------------------------------------------------------------------
 
 static std::string HostOf(const std::string &url); // with the server ranking, below
@@ -568,6 +570,30 @@ static std::string HostOf(const std::string &url); // with the server ranking, b
 #define STRIKES_TO_SWITCH  2
 #define MAX_SERVERS        5
 
+// How many connections a game downloads over: archive-connections: in
+// settings.txt, which Settings sets. archive.org holds each connection to
+// a couple of MB/s, so more go faster - until the 360's CPU, which decrypts
+// them all, can't keep up.
+static int ArchiveConnections()
+{
+    int connections = DEFAULT_CONNECTIONS;
+    FILE *f = fopen("game:\\settings.txt", "rb");
+    if (f == NULL)
+        return connections;
+    char line[256];
+    while (fgets(line, sizeof(line), f) != NULL)
+    {
+        if (_strnicmp(line, "archive-connections:", 20) == 0)
+        {
+            const int n = atoi(line + 20);
+            if (n >= 1)
+                connections = n < MAX_CONNECTIONS ? n : MAX_CONNECTIONS;
+        }
+    }
+    fclose(f);
+    return connections;
+}
+
 struct Download
 {
     std::string servers[MAX_SERVERS]; // fastest first, redirects already followed
@@ -581,16 +607,17 @@ struct Download
     unsigned long nextPiece;
     bool *done;
     unsigned long long doneBytes;
-    unsigned long long inFlight[CONNECTIONS];
-    unsigned long long resumedAt[CONNECTIONS]; // what a resumed piece already had
-    DWORD threadIds[CONNECTIONS];
+    int connections;          // at once, from settings.txt
+    unsigned long long inFlight[MAX_CONNECTIONS];
+    unsigned long long resumedAt[MAX_CONNECTIONS]; // what a resumed piece already had
+    DWORD threadIds[MAX_CONNECTIONS];
 
     // Each connection's request in hand, for the slow check and the log.
-    unsigned long piece[CONNECTIONS];
-    DWORD windowStart[CONNECTIONS];             // when the current window began
-    unsigned long long windowFrom[CONNECTIONS]; // the request's bytes then
-    DWORD lastLog[CONNECTIONS];
-    bool tooSlow[CONNECTIONS];                  // dropped by the slow check
+    unsigned long piece[MAX_CONNECTIONS];
+    DWORD windowStart[MAX_CONNECTIONS];             // when the current window began
+    unsigned long long windowFrom[MAX_CONNECTIONS]; // the request's bytes then
+    DWORD lastLog[MAX_CONNECTIONS];
+    bool tooSlow[MAX_CONNECTIONS];                  // dropped by the slow check
     bool failed;
     int failStatus;
     const bool *cancel;
@@ -622,7 +649,7 @@ static bool PieceProgress(unsigned long long done, unsigned long long, unsigned 
 
     EnterCriticalSection(&g_lock);
     DWORD me = GetCurrentThreadId();
-    for (int i = 0; i < CONNECTIONS; ++i)
+    for (int i = 0; i < d->connections; ++i)
     {
         if (d->threadIds[i] == me)
             slot = i;
@@ -745,6 +772,9 @@ static DWORD WINAPI ConnectionEntry(LPVOID param)
     const int slot = args->slot;
 
     XboxTLS_SetThreadIoTimeout(STALL_TIMEOUT_MS);
+    // A few MB a connection rather than 12, so a dozen fit.
+    XboxTLS_SetThreadRecvBuffer(CONNECTION_BUFFER);
+    SetThreadDownloadBuffers(CONNECTION_BUFFER);
 
     for (;;)
     {
@@ -1334,7 +1364,8 @@ static void RunJob(GameJob *job, const char *gamesPath)
     d.failStatus = 0;
     d.cancel = &job->cancel;
     d.pieceReady = CreateEvent(NULL, FALSE, FALSE, NULL);
-    for (int i = 0; i < CONNECTIONS; ++i)
+    d.connections = ArchiveConnections();
+    for (int i = 0; i < MAX_CONNECTIONS; ++i)
     {
         d.inFlight[i] = 0;
         d.resumedAt[i] = 0;
@@ -1366,10 +1397,11 @@ static void RunJob(GameJob *job, const char *gamesPath)
 
     g_download = &d;
 
-    ConnectionArgs args[CONNECTIONS];
-    HANDLE threads[CONNECTIONS];
+    ConnectionArgs args[MAX_CONNECTIONS];
+    HANDLE threads[MAX_CONNECTIONS];
     int started = 0;
-    for (int i = 0; i < CONNECTIONS; ++i)
+    dprintf("[game] %d connection(s)\n", d.connections);
+    for (int i = 0; i < d.connections; ++i)
     {
         args[i].d = &d;
         args[i].slot = i;
@@ -1377,15 +1409,15 @@ static void RunJob(GameJob *job, const char *gamesPath)
         if (threads[i] == NULL)
             break;
 #ifdef _XBOX
-        // TLS decryption is most of a connection's work, so each gets a core
-        // of its own: hardware thread 1 (core 0, beside the UI; the disc
-        // worker there mostly waits) and 4 (core 2, beside the cover worker).
-        // Core 1 is this thread's, inflating the pieces as they arrive.
-        XSetThreadProcessor(threads[i], i == 0 ? 1 : 4);
+        // TLS decryption is most of a connection's work, so they're spread
+        // over hardware threads 1 (core 0, beside the UI), 4 and 5 (core 2)
+        // and 2 - not 3, this thread's, inflating the pieces as they arrive.
+        static const DWORD kProcessors[] = { 1, 4, 5, 2 };
+        XSetThreadProcessor(threads[i], kProcessors[i % 4]);
 #endif
         ResumeThread(threads[i]);
         started++;
-        if (i + 1 < CONNECTIONS)
+        if (i + 1 < d.connections)
             Sleep(CONNECTION_STAGGER_MS);
     }
 
@@ -1401,7 +1433,7 @@ static void RunJob(GameJob *job, const char *gamesPath)
             bool ready = d.done[index];
             bool stop = Stopping(&d);
             unsigned long long bytes = d.doneBytes;
-            for (int i = 0; i < CONNECTIONS; ++i)
+            for (int i = 0; i < d.connections; ++i)
                 bytes += d.inFlight[i];
             LeaveCriticalSection(&g_lock);
 

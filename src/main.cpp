@@ -1311,6 +1311,7 @@ enum SettingsRow
     SETTINGS_ROW_LIBRARY_FOLDER, // one of g_folderRows: A adds or removes it
     SETTINGS_ROW_ADD_FOLDER,   // another library folder, typed
     SETTINGS_ROW_SOUNDS,       // the interface's sounds, on or off
+    SETTINGS_ROW_ARCHIVE_CONNECTIONS, // a value: how many connections a game downloads over
 
     // Usenet (Usenet.h): each typed, or toggled, into settings.txt
     SETTINGS_ROW_PROWLARR_ADDRESS,
@@ -1617,6 +1618,31 @@ static void StepDiscSpeed(int step)
     dprintf("Disc read speed set to %d (%s)\n", speed, DiscSpeedName(speed));
 }
 
+// How many connections an archive.org game downloads over - GameInstaller
+// reads the same key. 4 unless set; 1 to 12.
+#define ARCHIVE_CONNECTIONS_KEY "archive-connections: "
+#define ARCHIVE_CONNECTIONS_MAX 12
+
+static int ArchiveConnectionsSetting()
+{
+    char value[16];
+    GetSettingsPath(ARCHIVE_CONNECTIONS_KEY, "4", value, sizeof(value));
+    const int n = atoi(value);
+    return n < 1 ? 4 : (n > ARCHIVE_CONNECTIONS_MAX ? ARCHIVE_CONNECTIONS_MAX : n);
+}
+
+static void StepArchiveConnections(int step)
+{
+    const int n = ArchiveConnectionsSetting() + step;
+    if (n < 1 || n > ARCHIVE_CONNECTIONS_MAX)
+        return;
+    char value[8];
+    _snprintf(value, sizeof(value), "%d", n);
+    value[sizeof(value) - 1] = '\0';
+    if (!SetSettingsValue(ARCHIVE_CONNECTIONS_KEY, value))
+        ShowMessageUI("Not saved", "settings.txt could not be written.", NULL);
+}
+
 static void ToggleUiSounds()
 {
     const bool on = !UiSoundsSetting();
@@ -1828,6 +1854,21 @@ static void BuildSettingsPage(SettingsPage &page, const Library &lib, const char
         SettingsControlView &c = page.rows[page.count - 1].controls[0];
         c.valueIndex = speed - 1;
         c.valueCount = DISC_SPEED_FULL;
+    }
+
+    // How many connections a Store game downloads over: left and right.
+    static char archiveConnections[8];
+    const int connections = ArchiveConnectionsSetting();
+    _snprintf(archiveConnections, sizeof(archiveConnections), "%d", connections);
+    archiveConnections[sizeof(archiveConnections) - 1] = '\0';
+    AddSettingsRow(page, SETTINGS_VIEW_LINE, "archive.org connections");
+    AddSettingsControl(page, SETTINGS_CONTROL_VALUE, archiveConnections, SETTINGS_ROW_ARCHIVE_CONNECTIONS,
+                       "How many pieces of a Store game download at once - left and right change it. archive.org "
+                       "holds each to about 2.7 MB/s; past what the 360 can decrypt, more don't help.");
+    {
+        SettingsControlView &c = page.rows[page.count - 1].controls[0];
+        c.valueIndex = connections - 1;
+        c.valueCount = ARCHIVE_CONNECTIONS_MAX;
     }
 
     // The version, and whether there's a newer one.
@@ -5433,6 +5474,8 @@ static int RunApp()
                 {
                     if (settings.actions[settings.focusRow][settings.focusCol] == SETTINGS_ROW_USENET_CONNECTIONS)
                         StepUsenetConnections(right ? 1 : -1);
+                    else if (settings.actions[settings.focusRow][settings.focusCol] == SETTINGS_ROW_ARCHIVE_CONNECTIONS)
+                        StepArchiveConnections(right ? 1 : -1);
                     else
                         StepDiscSpeed(right ? 1 : -1);
                     shell.stale = true;

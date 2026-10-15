@@ -44,6 +44,12 @@ typedef bool (*DownloadProgressFn)(unsigned long long bytesDone,
 /// output should be ~64 bytes; returns false on a NULL/zero-size buffer.
 bool FormatBytes(unsigned long long bytes, char *output, size_t outputSize);
 
+/// @brief Sets the size of the network buffer and the file buffer each
+/// httpRequestHTTPS on the calling thread allocates - 4MB each by default, for
+/// one big download at a time. A thread that's one of many connections asks
+/// for less, so a dozen of them don't take 100MB. 0 goes back to the default.
+void SetThreadDownloadBuffers(unsigned long bytes);
+
 /// @brief downloads file over https using http 1.1 and tls 1.2
 int downloadFileHTTPS(const std::string URL, const std::string fileName, char *dataBuffer, unsigned long long *outputBufferSize, bool downloadIntoFile, void printFunction(const char *_format, ...));
 
