@@ -1625,9 +1625,21 @@ static void StepDiscSpeed(int step)
 
 static int ArchiveConnectionsSetting()
 {
-    char value[16];
-    GetSettingsPath(ARCHIVE_CONNECTIONS_KEY, "4", value, sizeof(value));
-    const int n = atoi(value);
+    // Not GetSettingsPath: it's for paths, and takes nothing shorter than 3
+    // characters - so "8" was never read back, and the setting looked stuck.
+    int n = 4;
+    FILE *fd = fopen(SETTINGS_FILE, "r");
+    if (fd != NULL)
+    {
+        char line[256];
+        const size_t keyLen = strlen(ARCHIVE_CONNECTIONS_KEY);
+        while (fgets(line, sizeof(line), fd) != NULL)
+        {
+            if (line[0] != '#' && strncmp(line, ARCHIVE_CONNECTIONS_KEY, keyLen) == 0)
+                n = atoi(line + keyLen);
+        }
+        fclose(fd);
+    }
     return n < 1 ? 4 : (n > ARCHIVE_CONNECTIONS_MAX ? ARCHIVE_CONNECTIONS_MAX : n);
 }
 
